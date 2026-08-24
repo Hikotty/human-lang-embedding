@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>校正レビュー - human-lang-embedding</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="editor-view" hidden>
+  <header id="topbar">
+    <div id="title-block">
+      <h1 id="doc-title">読み込み中…</h1>
+      <div id="doc-meta"></div>
+    </div>
+    <div id="actions">
+      <span id="save-state" title="保存状態"></span>
+      <button id="btn-undo" title="元に戻す (Cmd+Z)">↩ 元に戻す</button>
+      <button id="btn-redo" title="やり直す (Cmd+Shift+Z)">↪ やり直す</button>
+      <button id="btn-image" title="カーソル位置に画像を追加する">🖼 画像</button>
+      <input type="file" id="image-input" accept="image/png,image/jpeg,image/gif,image/webp" hidden>
+      <button id="btn-comment" title="選択範囲にコメントを付ける">💬 コメント</button>
+      <button id="btn-complete">✔ 校正完了</button>
+      <a class="nav-link" href="/admin" title="全セッションの校正結果を見る">管理画面</a>
+    </div>
+  </header>
+  <main id="main">
+    <div id="editor-wrap">
+      <div id="editor" contenteditable="true" spellcheck="false"></div>
+    </div>
+    <aside id="sidebar">
+      <h2>コメント</h2>
+      <div id="comment-draft" hidden>
+        <div class="quote" id="draft-quote"></div>
+        <textarea id="draft-text" rows="3" placeholder="コメントを入力"></textarea>
+        <div class="row">
+          <button id="draft-submit">追加</button>
+          <button id="draft-cancel" class="secondary">キャンセル</button>
+        </div>
+      </div>
+      <div id="comment-list"></div>
+    </aside>
+  </main>
+</div>
+<div id="list-view" hidden>
+  <header id="topbar">
+    <h1>校正レビュー一覧</h1>
+    <div id="actions">
+      <input id="search-query" placeholder="ID・タイトルで検索">
+      <input id="search-workspace" placeholder="ワークスペースで検索">
+      <a class="nav-link" href="/admin">管理画面</a>
+    </div>
+  </header>
+  <main><table id="session-table"></table></main>
+</div>
+<script src="/static/tracker.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

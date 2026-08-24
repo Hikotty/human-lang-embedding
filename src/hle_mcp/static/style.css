@@ -1,0 +1,213 @@
+/* 校正レビューエディタ スタイル */
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; padding: 0; height: 100%;
+  font-family: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic",
+    "Noto Sans JP", sans-serif;
+  background: #e8eaed; color: #202124;
+}
+#editor-view, #list-view { display: flex; flex-direction: column; height: 100vh; }
+#editor-view[hidden], #list-view[hidden] { display: none; }
+
+/* ---------- ヘッダー ---------- */
+#topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 20px; background: #fff; border-bottom: 1px solid #dadce0;
+  box-shadow: 0 1px 3px rgba(0,0,0,.08); z-index: 5;
+}
+#topbar h1 { font-size: 16px; margin: 0; font-weight: 600; }
+#doc-meta { font-size: 11px; color: #5f6368; margin-top: 2px; }
+#doc-meta .badge {
+  display: inline-block; padding: 1px 8px; border-radius: 10px;
+  background: #e8f0fe; color: #1967d2; margin-right: 6px; font-weight: 600;
+}
+#doc-meta .badge.reviewed { background: #e6f4ea; color: #137333; }
+#actions { display: flex; align-items: center; gap: 8px; }
+#actions button {
+  border: 1px solid #dadce0; background: #fff; border-radius: 6px;
+  padding: 6px 12px; font-size: 13px; cursor: pointer;
+}
+#actions button:hover { background: #f1f3f4; }
+/* 「#actions button」(1,0,1) より高い特異度にしないと背景白+文字白で不可視になる */
+#actions button#btn-complete {
+  background: #1a73e8; color: #fff; border-color: #1a73e8;
+}
+#actions button#btn-complete:hover { background: #1765cc; }
+#actions button#btn-complete.done { background: #137333; border-color: #137333; }
+#actions .nav-link {
+  font-size: 13px; color: #1a73e8; text-decoration: none;
+  padding: 6px 10px; border-radius: 6px;
+}
+#actions .nav-link:hover { background: #e8f0fe; }
+#save-state { font-size: 12px; color: #5f6368; min-width: 70px; text-align: right; }
+#actions input {
+  border: 1px solid #dadce0; border-radius: 6px; padding: 6px 10px; font-size: 13px;
+}
+
+/* ---------- 本体レイアウト ---------- */
+#main { display: flex; flex: 1; overflow: hidden; }
+#editor-wrap { flex: 1; overflow-y: auto; padding: 28px 24px; }
+#editor {
+  max-width: 780px; margin: 0 auto; background: #fff; border-radius: 4px;
+  box-shadow: 0 1px 4px rgba(0,0,0,.15); padding: 60px 70px; min-height: 70%;
+  font-size: 15px; line-height: 2.0; outline: none;
+}
+#editor p { margin: 0 0 0.4em; min-height: 1em; }
+
+/* ---------- トラックチェンジ表現 ---------- */
+#editor del {
+  color: #c5221f; text-decoration: line-through;
+  text-decoration-color: #c5221f; text-decoration-thickness: 1.5px;
+  background: rgba(197,34,31,.06);
+}
+#editor ins {
+  color: #c5221f; text-decoration: underline;
+  text-decoration-color: #c5221f; background: rgba(197,34,31,.06);
+}
+#editor .pb {
+  font-weight: 700; opacity: .75; user-select: none; padding: 0 1px;
+}
+#editor del.pb { text-decoration: line-through; }
+#editor ins.pb { text-decoration: none; }
+
+/* ---------- コメントハイライト ---------- */
+#editor .cmt { background: #feefc3; border-bottom: 2px solid #f9ab00; cursor: pointer; }
+#editor .cmt.active { background: #fdd663; }
+
+/* ---------- サイドバー ---------- */
+#sidebar {
+  width: 320px; border-left: 1px solid #dadce0; background: #f8f9fa;
+  overflow-y: auto; padding: 14px;
+}
+#sidebar h2 { font-size: 13px; color: #5f6368; margin: 0 0 10px; }
+.comment-card {
+  background: #fff; border: 1px solid #dadce0; border-radius: 8px;
+  padding: 10px 12px; margin-bottom: 10px; font-size: 13px; cursor: pointer;
+}
+.comment-card.active { border-color: #f9ab00; box-shadow: 0 1px 6px rgba(249,171,0,.35); }
+.comment-card .quote {
+  font-size: 11px; color: #5f6368; border-left: 3px solid #f9ab00;
+  padding: 2px 6px; margin-bottom: 6px; background: #fffbec;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.comment-card .who { font-weight: 700; font-size: 11px; margin-right: 6px; }
+.comment-card .who.ai { color: #1967d2; }
+.comment-card .who.human { color: #b06000; }
+.comment-card .when { color: #9aa0a6; font-size: 10px; }
+.comment-card .body { margin: 4px 0 6px; white-space: pre-wrap; }
+.comment-card .reply { border-top: 1px solid #f1f3f4; padding: 6px 0 2px; }
+.comment-card .reply-row { display: flex; gap: 6px; margin-top: 6px; }
+.comment-card .reply-row input {
+  flex: 1; border: 1px solid #dadce0; border-radius: 6px;
+  padding: 5px 8px; font-size: 12px;
+}
+.comment-card .reply-row button, #comment-draft button {
+  border: 1px solid #1a73e8; background: #1a73e8; color: #fff;
+  border-radius: 6px; padding: 5px 10px; font-size: 12px; cursor: pointer;
+}
+#comment-draft button.secondary, .comment-card button.secondary {
+  background: #fff; color: #1a73e8;
+}
+#comment-draft {
+  background: #fff; border: 2px solid #f9ab00; border-radius: 8px;
+  padding: 10px 12px; margin-bottom: 12px;
+}
+#comment-draft .quote {
+  font-size: 11px; color: #5f6368; border-left: 3px solid #f9ab00;
+  padding: 2px 6px; margin-bottom: 6px; background: #fffbec;
+}
+#comment-draft textarea {
+  width: 100%; border: 1px solid #dadce0; border-radius: 6px;
+  padding: 6px 8px; font-size: 13px; resize: vertical;
+}
+#comment-draft .row { display: flex; gap: 8px; margin-top: 6px; }
+.empty-note { color: #9aa0a6; font-size: 12px; text-align: center; margin-top: 30px; }
+
+/* ---------- 一覧ビュー ---------- */
+#list-view main { flex: 1; overflow-y: auto; padding: 24px; }
+#session-table {
+  width: 100%; max-width: 1000px; margin: 0 auto; border-collapse: collapse;
+  background: #fff; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,.12);
+  font-size: 13px;
+}
+#session-table th, #session-table td {
+  text-align: left; padding: 10px 14px; border-bottom: 1px solid #f1f3f4;
+}
+#session-table th { background: #f8f9fa; color: #5f6368; font-size: 12px; }
+#session-table a { color: #1a73e8; text-decoration: none; font-weight: 600; }
+#session-table tr:hover td { background: #f8f9fa; }
+
+/* ---------- 画像段落 ---------- */
+#editor .img-para {
+  position: relative; text-align: center; padding: 8px;
+  border: 1px dashed transparent; border-radius: 6px; cursor: pointer;
+  user-select: none;
+}
+#editor .img-para img {
+  max-width: 100%; max-height: 420px; border-radius: 4px;
+  box-shadow: 0 1px 4px rgba(0,0,0,.2);
+}
+#editor .img-para .img-caption {
+  display: block; font-size: 11px; color: #9aa0a6; margin-top: 2px;
+}
+#editor .img-para.sel { border-color: #1a73e8; background: #e8f0fe; }
+#editor .img-para[data-del="1"] img { opacity: .35; }
+#editor .img-para[data-del="1"] {
+  border-color: #c5221f; background: rgba(197,34,31,.05);
+}
+#editor .img-para[data-del="1"]::after {
+  content: "削除予定（Backspaceで取消）"; display: block;
+  color: #c5221f; font-size: 11px; font-weight: 700;
+}
+#editor .img-para[data-ins="1"] { border-color: #c5221f; }
+#editor .img-para[data-ins="1"] .img-caption::after {
+  content: "（追加）"; color: #c5221f; font-weight: 700;
+}
+
+/* ---------- 管理画面 ---------- */
+#admin-view { display: flex; flex-direction: column; height: 100vh; }
+#admin-view main { flex: 1; overflow-y: auto; padding: 24px; }
+.admin-card {
+  max-width: 1000px; margin: 0 auto 14px; background: #fff;
+  border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,.12); padding: 16px 20px;
+}
+.admin-card h3 { margin: 0; font-size: 15px; }
+.admin-card .meta { font-size: 12px; color: #5f6368; margin: 4px 0 8px; }
+.admin-card .row { display: flex; gap: 8px; align-items: center; }
+.admin-card button, .admin-card a.button {
+  border: 1px solid #dadce0; background: #fff; border-radius: 6px;
+  padding: 5px 12px; font-size: 12px; cursor: pointer;
+  color: #1a73e8; text-decoration: none; display: inline-block;
+}
+.admin-card button:hover, .admin-card a.button:hover { background: #f1f3f4; }
+.admin-detail { border-top: 1px solid #f1f3f4; margin-top: 10px; padding-top: 10px; }
+.admin-detail h4 { font-size: 12px; color: #5f6368; margin: 12px 0 4px; }
+.annotated {
+  background: #f8f9fa; border: 1px solid #f1f3f4; border-radius: 6px;
+  padding: 10px 12px; font-size: 13px; line-height: 1.9; white-space: pre-wrap;
+}
+.annotated del { color: #c5221f; background: rgba(197,34,31,.07); }
+.annotated ins {
+  color: #c5221f; background: rgba(197,34,31,.07);
+  text-decoration: underline;
+}
+.annotated .nl-badge, .annotated .img-badge {
+  display: inline-block; font-size: 10px; font-weight: 700; color: #fff;
+  background: #c5221f; border-radius: 4px; padding: 0 5px; margin: 0 2px;
+}
+.annotated .cmt-mark {
+  background: #feefc3; border-bottom: 2px solid #f9ab00;
+}
+.annotated .cmt-label {
+  font-size: 10px; font-weight: 700; color: #b06000; vertical-align: super;
+}
+.admin-comment {
+  border-left: 3px solid #f9ab00; background: #fffbec;
+  padding: 6px 10px; margin: 6px 0; font-size: 12px; border-radius: 0 6px 6px 0;
+}
+.admin-comment .who { font-weight: 700; margin-right: 6px; }
+.admin-comment .who.ai { color: #1967d2; }
+.admin-comment .reply { margin: 4px 0 0 14px; }
+.rev-block { margin-bottom: 8px; }
+.rev-block .rev-title { font-weight: 700; font-size: 12px; margin-bottom: 2px; }
+.empty-admin { text-align: center; color: #9aa0a6; margin-top: 40px; }

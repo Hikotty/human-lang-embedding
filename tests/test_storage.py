@@ -1,0 +1,218 @@
+"""storage モジュールのユニットテスト。"""
+
+from __future__ import annotations
+
+import pytest
+
+from hle_mcp import storage
+
+
+def test_create_and_load_session():
+    s = storage.create_session("本文です。", "タイトル", "/tmp/prj")
+    loaded = storage.load_session(s["id"])
+    assert loaded["id"] == s["id"]
+    assert loaded["title"] == "タイトル"
+    assert loaded["workspace"] == "/tmp/prj"
+    assert loaded["status"] == "editing"
+    assert len(loaded["revisions"]) == 1
+    assert loaded["revisions"][0]["base_text"] == "本文です。"
+    assert loaded["revisions"][0]["edited_html"] is None
+    assert loaded["comments"] == []
+
+
+def test_load_missing_session_raises():
+    with pytest.raises(KeyError):
+        storage.load_session("deadbeef")
+
+
+def test_invalid_session_id_raises():
+    with pytest.raises(KeyError):
+        storage.load_session("../evil")
+
+
+def test_set_document_updates_current_revision():
+    s = storage.create_session("t", "d", "")
+    storage.set_document(s["id"], "<p>edited</p>")
+    loaded = storage.load_session(s["id"])
+    assert loaded["revisions"][-1]["edited_html"] == "<p>edited</p>"
+
+
+def test_set_status_valid_and_invalid():
+    s = storage.create_session("t", "d", "")
+    storage.set_status(s["id"], "reviewed")
+    assert storage.load_session(s["id"])["status"] == "reviewed"
+    with pytest.raises(ValueError):
+        storage.set_status(s["id"], "bogus")
+
+
+def test_add_revision_resets_status():
+    s = storage.create_session("v1", "d", "")
+    storage.set_status(s["id"], "reviewed")
+    updated = storage.add_revision(s["id"], "v2")
+    assert updated["status"] == "editing"
+    assert len(updated["revisions"]) == 2
+    assert updated["revisions"][1]["base_text"] == "v2"
+    assert updated["revisions"][1]["index"] == 1
+
+
+def test_add_comment_and_reply():
+    s = storage.create_session("t", "d", "")
+    c = storage.add_comment(s["id"], quote="引用", text="コメント", comment_id="c1")
+    assert c["id"] == "c1"
+    assert c["author"] == "human"
+    assert c["revision"] == 0
+    r = storage.add_reply(s["id"], "c1", "AI返信", author="ai")
+    assert r["author"] == "ai"
+    loaded = storage.load_session(s["id"])
+    assert loaded["comments"][0]["replies"][0]["text"] == "AI返信"
+    # 返信への返信（多段ラリー）はスレッドに追記されていく
+    storage.add_reply(s["id"], "c1", "人間の再返信", author="human")
+    loaded = storage.load_session(s["id"])
+    assert [x["author"] for x in loaded["comments"][0]["replies"]] == ["ai", "human"]
+
+
+def test_duplicate_comment_id_raises():
+    s = storage.create_session("t", "d", "")
+    storage.add_comment(s["id"], "q", "t", comment_id="dup")
+    with pytest.raises(ValueError):
+        storage.add_comment(s["id"], "q2", "t2", comment_id="dup")
+
+
+def test_reply_to_missing_comment_raises():
+    s = storage.create_session("t", "d", "")
+    with pytest.raises(KeyError):
+        storage.add_reply(s["id"], "nope", "x", author="ai")
+
+
+def test_comment_revision_tracks_current():
+    s = storage.create_session("v1", "d", "")
+    storage.add_revision(s["id"], "v2")
+    c = storage.add_comment(s["id"], "q", "t")
+    assert c["revision"] == 1
+
+
+def test_list_sessions_search_and_order():
+    a = storage.create_session("x", "レポート校正", "/Users/me/prjA")
+    b = storage.create_session("y", "ブログ記事", "/Users/me/prjB")
+    all_sessions = storage.list_sessions()
+    assert {s["id"] for s in all_sessions} == {a["id"], b["id"]}
+
+    # タイトル部分一致
+    hit = storage.list_sessions(query="ブログ")
+    assert [s["id"] for s in hit] == [b["id"]]
+
+    # ID部分一致
+    hit = storage.list_sessions(query=a["id"][:6])
+    assert [s["id"] for s in hit] == [a["id"]]
+
+    # ワークスペース部分一致
+    hit = storage.list_sessions(workspace="prjA")
+    assert [s["id"] for s in hit] == [a["id"]]
+
+    # 該当なし
+    assert storage.list_sessions(query="存在しない") == []
+
+    # 更新日時降順: b を更新すると先頭に来る
+    storage.set_document(b["id"], "<p>x</p>")
+    ordered = storage.list_sessions()
+    assert ordered[0]["id"] == b["id"]
+
+
+def test_list_sessions_summary_fields():
+    s = storage.create_session("t", "d", "/w")
+    storage.add_comment(s["id"], "q", "c")
+    summary = storage.list_sessions()[0]
+    assert summary["comment_count"] == 1
+    assert summary["revision_count"] == 1
+    assert summary["status"] == "editing"
+    assert set(summary) >= {
+        "id", "title", "workspace", "status", "created_at", "updated_at",
+    }
+
+
+def test_list_sessions_limit():
+    for i in range(5):
+        storage.create_session("t", f"s{i}", "")
+    assert len(storage.list_sessions(limit=3)) == 3
+
+
+# ---------- 画像 ----------
+
+def test_save_image_and_get_path(png_file):
+    s = storage.create_session("t", "d", "")
+    name = storage.add_image_file(s["id"], str(png_file))
+    assert name == "figure.png"
+    path = storage.get_image_path(s["id"], name)
+    assert path.read_bytes() == png_file.read_bytes()
+    assert storage.list_images(s["id"]) == ["figure.png"]
+
+
+def test_save_image_unique_names(png_file):
+    s = storage.create_session("t", "d", "")
+    n1 = storage.add_image_file(s["id"], str(png_file))
+    n2 = storage.add_image_file(s["id"], str(png_file))
+    assert n1 == "figure.png"
+    assert n2 == "figure-1.png"
+
+
+def test_image_name_sanitized():
+    s = storage.create_session("t", "d", "")
+    name = storage.save_image_bytes(s["id"], "../evil name!.png", b"x")
+    assert name == "evil_name_.png"
+    assert storage.get_image_path(s["id"], name).is_file()
+
+
+def test_image_invalid_extension_rejected():
+    s = storage.create_session("t", "d", "")
+    with pytest.raises(ValueError):
+        storage.save_image_bytes(s["id"], "script.svg", b"<svg/>")
+    with pytest.raises(ValueError):
+        storage.save_image_bytes(s["id"], "noext", b"x")
+
+
+def test_image_size_limit():
+    s = storage.create_session("t", "d", "")
+    with pytest.raises(ValueError):
+        storage.save_image_bytes(s["id"], "big.png",
+                                 b"0" * (storage.MAX_IMAGE_BYTES + 1))
+
+
+def test_missing_image_raises():
+    s = storage.create_session("t", "d", "")
+    with pytest.raises(KeyError):
+        storage.get_image_path(s["id"], "nope.png")
+
+
+# ---------- 差分保存（リビジョン圧縮） ----------
+
+def test_add_revision_compacts_previous_html():
+    s = storage.create_session("初稿です。", "d", "")
+    storage.set_document(s["id"], "<p>初稿<del>です</del><ins>でした</ins>。</p>")
+    storage.add_revision(s["id"], "第二稿。")
+    loaded = storage.load_session(s["id"])
+    old = loaded["revisions"][0]
+    # 全文HTMLは破棄され、差分要約だけが残る
+    assert old["edited_html"] is None
+    fs = old["feedback_summary"]
+    assert fs["annotated_text"] == "初稿【削除:です】【追加:でした】。"
+    assert fs["result_text"] == "初稿でした。"
+    assert [c["type"] for c in fs["changes"]] == ["delete", "insert"]
+
+
+def test_add_revision_without_edits_no_summary():
+    s = storage.create_session("v1", "d", "")
+    storage.add_revision(s["id"], "v2")
+    loaded = storage.load_session(s["id"])
+    assert loaded["revisions"][0].get("feedback_summary") is None
+    assert loaded["revisions"][0]["edited_html"] is None
+
+
+def test_update_base_text():
+    s = storage.create_session("v1", "d", "")
+    storage.update_base_text(s["id"], "v1\n![](a.png)")
+    assert storage.load_session(s["id"])["revisions"][0]["base_text"] \
+        == "v1\n![](a.png)"
+    # 編集開始後は差し替え不可
+    storage.set_document(s["id"], "<p>v1</p>")
+    with pytest.raises(ValueError):
+        storage.update_base_text(s["id"], "x")

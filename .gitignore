@@ -1,0 +1,15 @@
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# ランタイムデータ（校正セッション・添付画像はリポジトリに含めない）
+data/
+
+# ツール生成物
+.security-scan/
+build.log
+
+# macOS
+.DS_Store
