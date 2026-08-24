@@ -17,7 +17,8 @@
   }
 
   function fmtDate(iso) {
-    return (iso || '').replace('T', ' ').replace(/([+-]\d{2}:\d{2}|Z)$/, '');
+    return (iso || '').replace('T', ' ')
+      .replace(/\.\d+/, '').replace(/([+-]\d{2}:\d{2}|Z)$/, '');
   }
 
   function esc(s) {
