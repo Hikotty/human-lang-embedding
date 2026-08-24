@@ -3,6 +3,7 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+.ruff_cache/
 
 # ランタイムデータ（校正セッション・添付画像はリポジトリに含めない）
 data/

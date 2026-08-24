@@ -21,10 +21,14 @@
       .replace(/\.\d+/, '').replace(/([+-]\d{2}:\d{2}|Z)$/, '');
   }
 
+  /* HTML特殊文字をエスケープする。属性値へ埋め込むため引用符も対象にする */
   function esc(s) {
-    const div = document.createElement('div');
-    div.textContent = s == null ? '' : String(s);
-    return div.innerHTML;
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
   /* ================= エディタ画面 ================= */

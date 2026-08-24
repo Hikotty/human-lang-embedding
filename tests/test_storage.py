@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from hle_mcp import storage
@@ -216,3 +218,41 @@ def test_update_base_text():
     storage.set_document(s["id"], "<p>v1</p>")
     with pytest.raises(ValueError):
         storage.update_base_text(s["id"], "x")
+
+
+# ---------- コメントIDの検証（属性インジェクション防止） ----------
+def test_add_comment_rejects_quote_in_id():
+    """data-cid属性を抜け出すIDを拒否する。"""
+    s = storage.create_session("t", "d", "")
+    with pytest.raises(ValueError):
+        storage.add_comment(
+            s["id"], quote="q", text="t", comment_id='x" onmouseover="alert(1)'
+        )
+    assert storage.load_session(s["id"])["comments"] == []
+
+
+@pytest.mark.parametrize(
+    "bad_id",
+    ["a b", "a<b", "a'b", "c#1", "x" * 65, "../etc", "あ"],
+)
+def test_add_comment_rejects_invalid_ids(bad_id):
+    s = storage.create_session("t", "d", "")
+    with pytest.raises(ValueError):
+        storage.add_comment(s["id"], quote="q", text="t", comment_id=bad_id)
+
+
+@pytest.mark.parametrize("empty", [None, ""])
+def test_add_comment_generates_id_when_unspecified(empty):
+    """ID未指定（None・空文字）はサーバー側で採番する。"""
+    s = storage.create_session("t", "d", "")
+    c = storage.add_comment(s["id"], quote="q", text="t", comment_id=empty)
+    assert re.fullmatch(r"c[0-9a-f]{8}", c["id"])
+
+
+def test_add_comment_accepts_browser_generated_id():
+    """ブラウザが採番する形式（'c' + base36）は従来どおり受け入れる。"""
+    s = storage.create_session("t", "d", "")
+    c = storage.add_comment(
+        s["id"], quote="q", text="t", comment_id="cmt77320wr5xa"
+    )
+    assert c["id"] == "cmt77320wr5xa"

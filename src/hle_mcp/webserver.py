@@ -34,6 +34,25 @@ _CONTENT_TYPES = {
     ".webp": "image/webp",
 }
 
+# ループバックを指す正当なホスト名。DNSリバインディング対策の許可リスト。
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]", "::1")
+
+# 全レスポンス共通のセキュリティヘッダ
+_SECURITY_HEADERS = (
+    ("X-Content-Type-Options", "nosniff"),
+    ("X-Frame-Options", "DENY"),
+    ("Referrer-Policy", "no-referrer"),
+)
+
+# HTMLに与えるCSP。インラインscript/styleは使っていないので'self'のみで足りる。
+_CSP_HTML = (
+    "default-src 'none'; script-src 'self'; style-src 'self'; "
+    "img-src 'self' data:; connect-src 'self'; form-action 'none'; "
+    "base-uri 'none'; frame-ancestors 'none'"
+)
+# HTML以外（JSON・画像・静的アセット）はすべて禁止で足りる。
+_CSP_STRICT = "default-src 'none'; frame-ancestors 'none'"
+
 
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -41,15 +60,71 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args) -> None:  # noqa: N802
         print(f"[hle-web] {fmt % args}", file=sys.stderr)
 
+    # ---------- リクエストガード ----------
+    def _allowed_hosts(self) -> set[str]:
+        port = self.server.server_address[1]
+        return {f"{h}:{port}" for h in _LOOPBACK_HOSTS} | set(_LOOPBACK_HOSTS)
+
+    def _allowed_origins(self) -> set[str]:
+        port = self.server.server_address[1]
+        return {f"http://{h}:{port}" for h in _LOOPBACK_HOSTS}
+
+    def _guard_reason(self) -> str | None:
+        """リクエストを拒否すべき理由を返す（許可する場合は None）。
+
+        - Host: ループバック名以外を拒否する（DNSリバインディング対策）
+        - Origin: 状態変更系で自オリジン以外を拒否する（CSRF対策）
+          ※ Originを送らないローカルCLIやテストは許可する。CSRFはブラウザ
+            由来の脅威であり、ローカルプロセスはデータを直読できるため。
+        - Content-Type: POSTはapplication/json必須（simple requestの封じ込め）
+        """
+        host = (self.headers.get("Host") or "").strip().lower()
+        if not host or host not in self._allowed_hosts():
+            return f"許可されないHostヘッダです: {host or '(なし)'}"
+        if self.command != "POST":
+            return None
+        origin = (self.headers.get("Origin") or "").strip()
+        if origin and origin.lower() not in self._allowed_origins():
+            return f"許可されないOriginです: {origin}"
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ctype != "application/json":
+            return (
+                "Content-Type に application/json を指定してください: "
+                f"{ctype or '(なし)'}"
+            )
+        return None
+
+    def _reject(self, reason: str) -> None:
+        """ガード違反を403で拒否し、接続を閉じる。
+
+        POSTの場合は呼び出し側で _drain_body してからこれを呼ぶ
+        （ボディを読み残したまま閉じるとクライアントが応答を読めない）。
+        """
+        self.log_message("拒否: %s", reason)
+        self.close_connection = True
+        self._send_json({"error": reason}, 403)
+
     # ---------- 共通レスポンス ----------
-    def _send_json(self, obj, status: int = 200) -> None:
-        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+    def _emit(self, body: bytes, ctype: str, status: int, csp: str) -> None:
         self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Security-Policy", csp)
+        for name, value in _SECURITY_HEADERS:
+            self.send_header(name, value)
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_json(self, obj, status: int = 200) -> None:
+        self._emit(
+            json.dumps(obj, ensure_ascii=False).encode("utf-8"),
+            "application/json; charset=utf-8",
+            status,
+            _CSP_STRICT,
+        )
 
     def _send_error_json(self, status: int, message: str) -> None:
         self._send_json({"error": message}, status)
@@ -58,14 +133,28 @@ class _Handler(BaseHTTPRequestHandler):
         if not path.is_file():
             self._send_error_json(404, "ファイルが見つかりません")
             return
-        body = path.read_bytes()
-        ctype = _CONTENT_TYPES.get(path.suffix, "application/octet-stream")
-        self.send_response(200)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+        csp = _CSP_HTML if path.suffix == ".html" else _CSP_STRICT
+        self._emit(
+            path.read_bytes(),
+            _CONTENT_TYPES.get(path.suffix, "application/octet-stream"),
+            200,
+            csp,
+        )
+
+    def _drain_body(self) -> None:
+        """拒否したPOSTのボディを読み捨てて接続の同期を保つ。"""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        remaining = min(max(length, 0), 1_000_000)
+        if length > remaining:
+            self.close_connection = True
+        while remaining > 0:
+            chunk = self.rfile.read(min(remaining, 65536))
+            if not chunk:
+                break
+            remaining -= len(chunk)
 
     def _read_body_json(self) -> dict:
         length = int(self.headers.get("Content-Length") or 0)
@@ -79,6 +168,10 @@ class _Handler(BaseHTTPRequestHandler):
 
     # ---------- GET ----------
     def do_GET(self) -> None:  # noqa: N802
+        reason = self._guard_reason()
+        if reason:
+            self._reject(reason)
+            return
         try:
             self._route_get()
         except KeyError as e:
@@ -123,6 +216,11 @@ class _Handler(BaseHTTPRequestHandler):
 
     # ---------- POST ----------
     def do_POST(self) -> None:  # noqa: N802
+        reason = self._guard_reason()
+        if reason:
+            self._drain_body()
+            self._reject(reason)
+            return
         try:
             self._route_post()
         except KeyError as e:

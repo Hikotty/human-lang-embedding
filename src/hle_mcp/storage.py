@@ -19,6 +19,10 @@ _LOCK = threading.RLock()
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
+# セッションID・コメントIDに許可する文字。パス要素やHTML属性に埋め込むため
+# 英数字・ハイフン・アンダースコアのみに限定する。
+_ID_PATTERN = r"[A-Za-z0-9_-]{1,64}"
+
 
 def data_dir() -> Path:
     """データ保存ディレクトリ（環境変数 HLE_DATA_DIR で上書き可能）。"""
@@ -42,7 +46,7 @@ def _new_id(prefix: str = "") -> str:
 
 
 def _session_path(session_id: str) -> Path:
-    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", session_id):
+    if not re.fullmatch(_ID_PATTERN, session_id):
         raise KeyError(f"不正なセッションID: {session_id!r}")
     return sessions_dir() / f"{session_id}.json"
 
@@ -202,10 +206,16 @@ def add_comment(
     author: str = "human",
     comment_id: str | None = None,
 ) -> dict[str, Any]:
-    """コメントを追加する。comment_id はブラウザ側で採番したIDを受け入れる。"""
+    """コメントを追加する。comment_id はブラウザ側で採番したIDを受け入れる。
+
+    comment_id は HTML の data-cid 属性やCSSセレクタに埋め込まれるため、
+    英数字・ハイフン・アンダースコアのみに制限する（属性インジェクション防止）。
+    """
     with _LOCK:
         s = load_session(session_id)
         cid = comment_id or _new_id("c")
+        if not re.fullmatch(_ID_PATTERN, cid):
+            raise ValueError(f"不正なコメントID: {cid!r}")
         if any(c["id"] == cid for c in s["comments"]):
             raise ValueError(f"コメントIDが重複しています: {cid}")
         comment = {
@@ -254,7 +264,7 @@ MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 def files_dir(session_id: str) -> Path:
     """セッションに紐づく画像ファイルの保存ディレクトリ。"""
-    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", session_id):
+    if not re.fullmatch(_ID_PATTERN, session_id):
         raise KeyError(f"不正なセッションID: {session_id!r}")
     d = data_dir() / "files" / session_id
     d.mkdir(parents=True, exist_ok=True)

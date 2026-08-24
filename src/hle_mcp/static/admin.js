@@ -12,10 +12,14 @@
     return data;
   }
 
+  /* HTML特殊文字をエスケープする。属性値へ埋め込むため引用符も対象にする */
   function esc(s) {
-    const div = document.createElement('div');
-    div.textContent = s == null ? '' : String(s);
-    return div.innerHTML;
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
   function fmtDate(iso) {
@@ -23,9 +27,22 @@
       .replace(/\.\d+/, '').replace(/([+-]\d{2}:\d{2}|Z)$/, '');
   }
 
-  /* 注釈テキスト（【削除:】等のマーカー）をHTML表示に変換する */
+  /* 注釈テキスト（【削除:】等のマーカー）をHTML表示に変換する。
+     本文由来の記号は \【 のようにエスケープされているので、マーカー展開の前に
+     退避し、展開後に生の記号へ戻す（誤展開の防止）。 */
+  const _ESCAPED = [
+    ['\\\\\\\\', '\u0011', '\\'],
+    ['\\\\【', '\u0012', '【'],
+    ['\\\\】', '\u0013', '】'],
+    ['\\\\〖', '\u0014', '〖'],
+    ['\\\\〗', '\u0015', '〗'],
+  ];
+
   function renderAnnotated(text) {
     let html = esc(text);
+    _ESCAPED.forEach(([pattern, holder]) => {
+      html = html.replace(new RegExp(pattern, 'g'), holder);
+    });
     html = html
       .replace(/【削除:([\s\S]*?)】/g, '<del>$1</del>')
       .replace(/【追加:([\s\S]*?)】/g, '<ins>$1</ins>')
@@ -39,6 +56,9 @@
         '<span class="cmt-label">C$1[</span><span class="cmt-mark">')
       .replace(/〖\/C(\d+)〗/g,
         '</span><span class="cmt-label">]C$1</span>');
+    _ESCAPED.forEach(([, holder, literal]) => {
+      html = html.split(holder).join(literal);
+    });
     return html;
   }
 
@@ -113,7 +133,7 @@
     const el = document.createElement('div');
     el.className = 'admin-card';
     el.innerHTML =
-      '<div class="row" style="justify-content: space-between">' +
+      '<div class="row spread">' +
       '<h3>' + esc(s.title) + '</h3><div>' + statusBadge(s.status) +
       '</div></div>' +
       '<div class="meta">ID: ' + esc(s.id) + '　第' + s.revision_count +

@@ -11,11 +11,17 @@ BASE_TEXT = "これはAIが書いた文章です。\n二段落目の文章です
 
 
 @pytest.fixture(scope="session")
-def browser():
+def playwright():
+    """Playwright本体。sync APIは多重起動できないためセッション共有する。"""
     with sync_playwright() as p:
-        b = p.chromium.launch()
-        yield b
-        b.close()
+        yield p
+
+
+@pytest.fixture(scope="session")
+def browser(playwright):
+    b = playwright.chromium.launch()
+    yield b
+    b.close()
 
 
 @pytest.fixture()

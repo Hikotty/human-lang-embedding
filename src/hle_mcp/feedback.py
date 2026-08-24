@@ -7,6 +7,11 @@
 - changes:       変更点の構造化リスト
 を生成する。
 
+original_text / result_text / changes は本文をそのまま保持する厳密な表現で、
+annotated_text だけが可読性のためのマーカー付き表現である。マーカー記号が
+本文に含まれる場合の曖昧さを避けるため、annotated_text 内の本文由来の
+【】〖〗 と \\ はバックスラッシュでエスケープされる。
+
 HTML上の規約:
 - 段落は <p>、削除は <del>、追加は <ins>
 - 改行の追加/削除マーカーは class="pb" を持つ ins/del（中身は¶で無視）
@@ -19,6 +24,28 @@ from html.parser import HTMLParser
 from typing import Any
 
 _ZWSP = "\u200b"
+
+# annotated_text のマーカー記号。本文中に同じ記号が現れると削除/追加の境界が
+# 曖昧になるため（日本語では【重要】のような表記が普通に出現する）、
+# 本文由来の文字はバックスラッシュでエスケープして区別する。可逆な変換であり
+# result_text / changes 側は一切加工しない。
+_MARKER_CHARS = "【】〖〗"
+# 制御文字はマーカー解析や表示を壊すため落とす（タブのみ許可）
+_CONTROL_CHARS = {c: None for c in range(0x20) if c != 0x09}
+_CONTROL_CHARS[0x7F] = None
+
+
+def escape_markers(text: str) -> str:
+    """本文由来テキストのマーカー記号をエスケープする。
+
+    `\\` を `\\\\` に、`【】〖〗` を `\\【` のように前置エスケープする。
+    """
+    out: list[str] = []
+    for ch in str(text).translate(_CONTROL_CHARS):
+        if ch == "\\" or ch in _MARKER_CHARS:
+            out.append("\\")
+        out.append(ch)
+    return "".join(out)
 
 
 class _Segment:
@@ -206,13 +233,13 @@ def compose_annotated(
     lines: list[str] = []
     for para in paragraphs:
         if para.img is not None:
-            name = para.img["name"]
+            name = escape_markers(para.img["name"])
             if para.img["del"]:
                 lines.append(f"【画像削除:{name}】")
             elif para.img["ins"]:
                 lines.append(f"【画像追加:{name}】")
             else:
-                lines.append(para.img["md"])
+                lines.append(escape_markers(para.img["md"]))
             continue
         buf: list[str] = []
         open_cids: list[str] = []
@@ -230,12 +257,13 @@ def compose_annotated(
                 if n:
                     buf.append(f"〖C{n}〗")
                 open_cids.append(cid)
+            text = escape_markers(seg.text)
             if seg.in_del:
-                buf.append(f"【削除:{seg.text}】")
+                buf.append(f"【削除:{text}】")
             elif seg.in_ins:
-                buf.append(f"【追加:{seg.text}】")
+                buf.append(f"【追加:{text}】")
             else:
-                buf.append(seg.text)
+                buf.append(text)
         for cid in reversed(open_cids):
             n = comment_numbers.get(cid)
             if n:
@@ -297,7 +325,7 @@ def build_feedback(session: dict[str, Any]) -> dict[str, Any]:
     else:
         original = base_text
         result = base_text
-        annotated = base_text
+        annotated = escape_markers(base_text)
         changes = []
     comments = [
         {
