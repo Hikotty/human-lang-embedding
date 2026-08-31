@@ -70,6 +70,57 @@ html, body {
 #editor del.pb { text-decoration: line-through; }
 #editor ins.pb { text-decoration: none; }
 
+/* ---------- マークダウン装飾 ----------
+   記法の記号(.md-mk)は原文復元のためテキストとして残す必要があるので、
+   消さずに小さく淡く表示する。装飾は段落/範囲のclassで表現する。 */
+#editor .md-mk { color: #b8bcc0; font-weight: 400; font-size: .8em; }
+/* del/ins の内側に来た記号は変更色を継がせる（灰色に沈ませない） */
+#editor del .md-mk, #editor ins .md-mk { color: inherit; opacity: .7; }
+
+#editor .md-h1, #editor .md-h2, #editor .md-h3,
+#editor .md-h4, #editor .md-h5, #editor .md-h6 {
+  font-weight: 700; line-height: 1.5; margin: 1.1em 0 .45em;
+}
+#editor .md-h1 { font-size: 1.7em; }
+#editor .md-h2 {
+  font-size: 1.4em; border-bottom: 1px solid #e8eaed; padding-bottom: .12em;
+}
+#editor .md-h3 { font-size: 1.2em; }
+#editor .md-h4 { font-size: 1.06em; }
+#editor .md-h5, #editor .md-h6 { font-size: 1em; color: #5f6368; }
+
+#editor .md-li { margin: 0 0 .15em; }
+#editor .md-in1 { padding-left: 1.7em; }
+#editor .md-in2 { padding-left: 3.4em; }
+#editor .md-in3 { padding-left: 5.1em; }
+
+#editor .md-quote {
+  border-left: 3px solid #dadce0; padding-left: .8em; color: #5f6368;
+}
+
+/* コードブロックは段落ごとに<p>のままなので、上下marginを消して連続させる */
+#editor .md-code, #editor .md-fence, #editor .md-tr {
+  font-family: "SFMono-Regular", Menlo, Consolas, "Courier New", monospace;
+  font-size: .85em; line-height: 1.75; white-space: pre-wrap;
+  background: #f6f8fa; margin: 0; padding: 0 .7em;
+}
+/* フェンス行に上下の余白を持たせ、ブロック全体が箱に見えるようにする */
+#editor .md-fence { color: #9aa0a6; padding: .3em .7em; }
+#editor .md-tr { background: #f8f9fa; }
+#editor .md-hr {
+  border-bottom: 2px solid #e8eaed; line-height: 1.2; margin: .6em 0;
+}
+
+#editor .md-b { font-weight: 700; }
+#editor .md-i { font-style: italic; }
+/* del の赤斜線と紛れないよう、取り消し線は灰色にする */
+#editor .md-s { text-decoration: line-through; text-decoration-color: #9aa0a6; }
+#editor .md-link { color: #1a73e8; }
+#editor .md-code-in {
+  font-family: "SFMono-Regular", Menlo, Consolas, "Courier New", monospace;
+  font-size: .88em; background: #f1f3f4; border-radius: 3px; padding: .1em .2em;
+}
+
 /* ---------- コメントハイライト ---------- */
 #editor .cmt { background: #feefc3; border-bottom: 2px solid #f9ab00; cursor: pointer; }
 #editor .cmt.active { background: #fdd663; }

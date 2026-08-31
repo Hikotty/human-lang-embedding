@@ -24,6 +24,25 @@
   const ZWSP = '\u200B';
   const IMG_LINE = /^!\[([^\]]*)\]\(([^)\s]+)\)$/;
 
+  // ---------- マークダウン装飾 ----------
+  // 記法の記号はDOMテキストとして保持したまま、CSSで視覚的に装飾する。
+  // 記号を消してリッチ要素へ置き換えると編集HTMLから原文へ戻せなくなる
+  // （feedback.py の逆変換は p/del/ins/span とテキストノードだけを見る）。
+  // そのため記号は .md-mk で控えめに表示するにとどめ、装飾は class で行う。
+  const MD_FENCE = /^\s*(?:```|~~~)/;
+  const MD_HEADING = /^(\s*#{1,6}[ \t]+)(.*)$/;
+  const MD_QUOTE = /^(\s*>+[ \t]?)(.*)$/;
+  const MD_UL = /^([ \t]*)([-*+][ \t]+)(.*)$/;
+  const MD_OL = /^([ \t]*)(\d{1,9}[.)][ \t]+)(.*)$/;
+  const MD_HR = /^\s*([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
+  const MD_TABLE = /^\s*\|.*\|\s*$/;
+  // インライン記法。コードを最優先に置き、コード内の記号を解釈しないようにする
+  const MD_INLINE_SRC =
+    '(`+)([^`\\n]+?)\\1' +            // `code`
+    '|(\\*\\*|__|~~)([^\\n]+?)\\3' +  // **bold** __bold__ ~~strike~~
+    '|([*_])([^*_\\n]+?)\\5' +        // *italic* _italic_
+    '|\\[([^\\]\\n]*)\\]\\(([^)\\s]*)\\)';  // [text](url)
+
   // ---------- ユーティリティ ----------
   function closestEl(node, sel) {
     const el = node && (node.nodeType === 1 ? node : node.parentElement);
@@ -613,19 +632,114 @@
     return p;
   }
 
+  // ---------- マークダウンの組み立て ----------
+  function mdMark(text) {
+    const s = document.createElement('span');
+    s.className = 'md-mk';
+    s.textContent = text;
+    return s;
+  }
+
+  function mdIndentClass(spaces) {
+    const width = String(spaces || '').replace(/\t/g, '  ').length;
+    const n = Math.min(3, Math.floor(width / 2));
+    return n > 0 ? ' md-in' + n : '';
+  }
+
+  /* テキストにインライン記法の装飾を当てて parent に追加する。
+     記号は .md-mk のテキストノードとして残すので原文は完全に復元できる。 */
+  function appendInline(parent, text) {
+    if (!text) return;
+    const re = new RegExp(MD_INLINE_SRC, 'g');
+    let last = 0;
+    let m;
+    while ((m = re.exec(text))) {
+      let cls, open, close, body;
+      let nested = true;
+      if (m[1]) {
+        cls = 'md-code-in'; open = m[1]; close = m[1]; body = m[2]; nested = false;
+      } else if (m[3]) {
+        cls = m[3] === '~~' ? 'md-s' : 'md-b';
+        open = m[3]; close = m[3]; body = m[4];
+      } else if (m[5]) {
+        cls = 'md-i'; open = m[5]; close = m[5]; body = m[6];
+      } else {
+        cls = 'md-link'; open = '['; close = '](' + m[8] + ')'; body = m[7];
+      }
+      // 内側が空・前後が空白のものは記法として扱わない（素のテキストとして残す）
+      if (!body || /^\s|\s$/.test(body)) continue;
+      if (m.index > last) {
+        parent.appendChild(document.createTextNode(text.slice(last, m.index)));
+      }
+      const wrap = document.createElement('span');
+      wrap.className = cls;
+      wrap.appendChild(mdMark(open));
+      if (nested) appendInline(wrap, body);
+      else wrap.appendChild(document.createTextNode(body));
+      wrap.appendChild(mdMark(close));
+      parent.appendChild(wrap);
+      last = m.index + m[0].length;
+    }
+    if (last < text.length) {
+      parent.appendChild(document.createTextNode(text.slice(last)));
+    }
+  }
+
+  /* 1行をブロック記法として解析する。state.fence でコードブロック内を追跡する。
+     prefix は記号部分（.md-mk にする）、body は装飾対象の本文。
+     plain=true の行はインライン記法を解釈しない。 */
+  function mdBlock(line, state) {
+    const raw = String(line);
+    if (MD_FENCE.test(raw)) {
+      state.fence = !state.fence;
+      return { cls: 'md-fence', prefix: raw, body: '' };
+    }
+    if (state.fence) return { cls: 'md-code', prefix: '', body: raw, plain: true };
+    if (MD_HR.test(raw)) return { cls: 'md-hr', prefix: raw, body: '' };
+    if (MD_TABLE.test(raw)) return { cls: 'md-tr', prefix: '', body: raw, plain: true };
+    let m = raw.match(MD_HEADING);
+    if (m) {
+      const level = m[1].replace(/[^#]/g, '').length;
+      return { cls: 'md-h' + level, prefix: m[1], body: m[2] };
+    }
+    m = raw.match(MD_QUOTE);
+    if (m) return { cls: 'md-quote', prefix: m[1], body: m[2] };
+    m = raw.match(MD_UL);
+    if (m) {
+      return { cls: 'md-li' + mdIndentClass(m[1]), prefix: m[1] + m[2], body: m[3] };
+    }
+    m = raw.match(MD_OL);
+    if (m) {
+      return {
+        cls: 'md-li md-ol' + mdIndentClass(m[1]),
+        prefix: m[1] + m[2],
+        body: m[3]
+      };
+    }
+    return { cls: '', prefix: '', body: raw };
+  }
+
   // ---------- 初期化 ----------
   function renderBase(text) {
     editor.textContent = '';
     const lines = String(text).replace(/\r\n?/g, '\n').split('\n');
+    const state = { fence: false };
     lines.forEach((line) => {
       const m = line.match(IMG_LINE);
-      if (m) {
+      if (m && !state.fence) {
         editor.appendChild(makeImageParagraph(m[2], line, {}));
         return;
       }
+      const info = mdBlock(line, state);
       const p = document.createElement('p');
-      if (line) p.textContent = line;
-      else p.appendChild(document.createElement('br'));
+      if (info.cls) p.className = info.cls;
+      if (info.prefix) p.appendChild(mdMark(info.prefix));
+      if (info.plain) {
+        if (info.body) p.appendChild(document.createTextNode(info.body));
+      } else {
+        appendInline(p, info.body);
+      }
+      if (!p.hasChildNodes()) p.appendChild(document.createElement('br'));
       editor.appendChild(p);
     });
     if (!editor.hasChildNodes()) {
