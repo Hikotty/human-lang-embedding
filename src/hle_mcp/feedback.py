@@ -336,6 +336,8 @@ def build_feedback(session: dict[str, Any]) -> dict[str, Any]:
             "text": c.get("text", ""),
             "author": c.get("author", "human"),
             "created_at": c.get("created_at", ""),
+            # 人間が後から書き換えたコメントには updated_at が入る
+            "updated_at": c.get("updated_at", ""),
             "replies": c.get("replies", []),
         }
         for c in session["comments"]

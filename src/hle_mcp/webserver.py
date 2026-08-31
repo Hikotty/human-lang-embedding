@@ -257,6 +257,26 @@ class _Handler(BaseHTTPRequestHandler):
                 author=str(body.get("author", "human")),
             )
             self._send_json(reply)
+        # 更新・削除もPOSTのサブパスで受ける。DELETE/PATCHを増やすと
+        # _guard_reason のOrigin/Content-Type検査がPOST限定なので穴になる。
+        elif parts[3] == "comments" and len(parts) == 6 and parts[5] == "update":
+            comment = storage.update_comment(
+                sid, parts[4], str(body.get("text", ""))
+            )
+            self._send_json(comment)
+        elif parts[3] == "comments" and len(parts) == 6 and parts[5] == "delete":
+            storage.delete_comment(sid, parts[4])
+            self._send_json({"ok": True})
+        elif parts[3] == "comments" and len(parts) == 8 \
+                and parts[5] == "replies" and parts[7] == "update":
+            reply = storage.update_reply(
+                sid, parts[4], parts[6], str(body.get("text", ""))
+            )
+            self._send_json(reply)
+        elif parts[3] == "comments" and len(parts) == 8 \
+                and parts[5] == "replies" and parts[7] == "delete":
+            storage.delete_reply(sid, parts[4], parts[6])
+            self._send_json({"ok": True})
         elif parts[3] == "status" and len(parts) == 4:
             storage.set_status(sid, str(body.get("status", "")))
             self._send_json({"ok": True})

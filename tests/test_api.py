@@ -140,6 +140,70 @@ def test_duplicate_comment_400_and_missing_comment_404(web_port):
     assert code == 404
 
 
+def test_comment_update_and_delete_endpoints(web_port):
+    s = storage.create_session("t", "d", "")
+    _post(web_port, f"/api/sessions/{s['id']}/comments",
+          {"id": "c1", "quote": "引用", "text": "指摘"})
+    _, reply = _post(web_port, f"/api/sessions/{s['id']}/comments/c1/replies",
+                     {"text": "回答", "author": "ai"})
+    rid = reply["id"]
+
+    status, updated = _post(
+        web_port, f"/api/sessions/{s['id']}/comments/c1/update",
+        {"text": "直した指摘"})
+    assert status == 200 and updated["text"] == "直した指摘"
+
+    status, upd_reply = _post(
+        web_port, f"/api/sessions/{s['id']}/comments/c1/replies/{rid}/update",
+        {"text": "直した回答"})
+    assert status == 200 and upd_reply["text"] == "直した回答"
+
+    status, data = _post(
+        web_port,
+        f"/api/sessions/{s['id']}/comments/c1/replies/{rid}/delete", {})
+    assert status == 200 and data == {"ok": True}
+    loaded = storage.load_session(s["id"])
+    assert loaded["comments"][0]["replies"] == []
+    assert loaded["comments"][0]["text"] == "直した指摘"  # 本体は残る
+
+    status, data = _post(
+        web_port, f"/api/sessions/{s['id']}/comments/c1/delete", {})
+    assert status == 200 and data == {"ok": True}
+    assert storage.load_session(s["id"])["comments"] == []
+
+
+def test_comment_update_delete_error_codes(web_port):
+    s = storage.create_session("t", "d", "")
+    _post(web_port, f"/api/sessions/{s['id']}/comments",
+          {"id": "c1", "quote": "", "text": "指摘"})
+    # 存在しない対象は404
+    assert _status_of(lambda: _post(
+        web_port, f"/api/sessions/{s['id']}/comments/none/update",
+        {"text": "x"})) == 404
+    assert _status_of(lambda: _post(
+        web_port, f"/api/sessions/{s['id']}/comments/none/delete", {})) == 404
+    assert _status_of(lambda: _post(
+        web_port, f"/api/sessions/{s['id']}/comments/c1/replies/none/delete",
+        {})) == 404
+    # 空文字への更新は400（削除と区別する）
+    assert _status_of(lambda: _post(
+        web_port, f"/api/sessions/{s['id']}/comments/c1/update",
+        {"text": "  "})) == 400
+    assert storage.load_session(s["id"])["comments"][0]["text"] == "指摘"
+
+
+def test_deleting_comment_renumbers_remaining(web_port):
+    """削除するとC番号が繰り上がる。AIは get_feedback を取り直す必要がある。"""
+    s = storage.create_session("t", "d", "")
+    for i, cid in enumerate(("c1", "c2", "c3"), 1):
+        _post(web_port, f"/api/sessions/{s['id']}/comments",
+              {"id": cid, "quote": "", "text": f"{i}つ目"})
+    _post(web_port, f"/api/sessions/{s['id']}/comments/c1/delete", {})
+    _, fb = _get(web_port, f"/api/sessions/{s['id']}/feedback")
+    assert [(c["number"], c["text"]) for c in fb["comments"]] \
+        == [(1, "2つ目"), (2, "3つ目")]
+
+
 def test_post_to_missing_session_404(web_port):
     code = _status_of(lambda: _post(
         web_port, "/api/sessions/nosession/document", {"html": "<p>x</p>"}))

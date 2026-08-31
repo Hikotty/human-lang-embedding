@@ -257,6 +257,78 @@ def add_reply(
         return reply
 
 
+def _require_text(text: str, label: str) -> str:
+    """編集後の本文が空になるのを拒否する。
+
+    空にする意図は「削除」なので、黙って空カードを残さず明示的に失敗させる。
+    """
+    value = str(text)
+    if not value.strip():
+        raise ValueError(f"{label}を空にはできません")
+    return value
+
+
+def update_comment(session_id: str, comment_id: str, text: str) -> dict[str, Any]:
+    """コメント本文を書き換える。"""
+    with _LOCK:
+        s = load_session(session_id)
+        comment = find_comment(s, comment_id)
+        comment["text"] = _require_text(text, "コメント本文")
+        comment["updated_at"] = _now()
+        save_session(s)
+        return comment
+
+
+def delete_comment(session_id: str, comment_id: str) -> dict[str, Any]:
+    """コメントを返信ごと削除する。
+
+    本文中の <span class="cmt" data-cid> はブラウザ側で外す。残っていても
+    annotated_text には現れない（番号が引けないため）が、ハイライトだけが
+    残った孤児spanになるので、エディタは削除と同時に編集HTMLを保存し直す。
+    """
+    with _LOCK:
+        s = load_session(session_id)
+        find_comment(s, comment_id)  # 存在しなければ KeyError
+        s["comments"] = [c for c in s["comments"] if c["id"] != comment_id]
+        save_session(s)
+        return s
+
+
+def find_reply(comment: dict[str, Any], reply_id: str) -> dict[str, Any]:
+    for r in comment.get("replies", []):
+        if r["id"] == reply_id:
+            return r
+    raise KeyError(f"返信が見つかりません: {reply_id}")
+
+
+def update_reply(
+    session_id: str, comment_id: str, reply_id: str, text: str
+) -> dict[str, Any]:
+    """返信本文を書き換える。"""
+    with _LOCK:
+        s = load_session(session_id)
+        reply = find_reply(find_comment(s, comment_id), reply_id)
+        reply["text"] = _require_text(text, "返信本文")
+        reply["updated_at"] = _now()
+        save_session(s)
+        return reply
+
+
+def delete_reply(
+    session_id: str, comment_id: str, reply_id: str
+) -> dict[str, Any]:
+    """返信をスレッドから削除する（コメント本体は残す）。"""
+    with _LOCK:
+        s = load_session(session_id)
+        comment = find_comment(s, comment_id)
+        find_reply(comment, reply_id)  # 存在しなければ KeyError
+        comment["replies"] = [
+            r for r in comment["replies"] if r["id"] != reply_id
+        ]
+        save_session(s)
+        return comment
+
+
 # ---------- 画像ファイル ----------
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 MAX_IMAGE_BYTES = 10 * 1024 * 1024

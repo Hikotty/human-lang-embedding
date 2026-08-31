@@ -157,6 +157,40 @@ def test_post_rejects_missing_content_type(web_port, sid):
     assert status == 403
 
 
+def test_comment_update_is_guarded(web_port, sid):
+    """更新・削除もPOSTのサブパスなので既存ガードがそのまま効く。
+
+    DELETE/PATCH を増やすと _guard_reason の Origin/Content-Type 検査が
+    POST 限定であるために素通りしてしまう。その回避策が効いていることを
+    ここで担保する。
+    """
+    storage.add_comment(sid, "q", "元の本文", comment_id="c1")
+    status, _, _ = _request(
+        web_port,
+        f"/api/sessions/{sid}/comments/c1/update",
+        method="POST",
+        headers={"Content-Type": "text/plain"},
+        body={"text": "改ざん"},
+    )
+    assert status == 403
+    assert storage.load_session(sid)["comments"][0]["text"] == "元の本文"
+
+
+def test_comment_delete_rejects_foreign_origin(web_port, sid):
+    storage.add_comment(sid, "q", "残るべき", comment_id="c1")
+    status, _, raw = _request(
+        web_port,
+        f"/api/sessions/{sid}/comments/c1/delete",
+        method="POST",
+        headers={"Content-Type": "application/json",
+                 "Origin": f"http://evil.example:{web_port}"},
+        body={},
+    )
+    assert status == 403
+    assert "Origin" in json.loads(raw)["error"]
+    assert len(storage.load_session(sid)["comments"]) == 1
+
+
 def test_post_accepts_content_type_with_charset(web_port, sid):
     status, _, _ = _request(
         web_port,

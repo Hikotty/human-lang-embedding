@@ -174,6 +174,122 @@ def test_comment_cancel_removes_highlight(review):
     assert storage.load_session(sid)["comments"] == []
 
 
+def _add_comment(page, sid, text: str) -> str:
+    """本文の先頭3文字にコメントを付けて、そのIDを返す。"""
+    select_in_editor(page, 0, 0, 3)
+    page.click("#btn-comment")
+    page.fill("#draft-text", text)
+    page.click("#draft-submit")
+    expect(page.locator(".comment-card")).to_have_count(1)
+    wait_saved(page)
+    return storage.load_session(sid)["comments"][0]["id"]
+
+
+def test_comment_can_be_edited(review):
+    page, sid = review
+    cid = _add_comment(page, sid, "書き出しが単調です")
+    page.click(f'button[data-edit="{cid}"]')
+    ta = page.locator("textarea[data-edit-input]")
+    expect(ta).to_have_value("書き出しが単調です")
+    ta.fill("書き出しを具体例から始めてください")
+    page.click(f'button[data-edit-save="{cid}"]')
+    expect(page.locator(".comment-card .body")).to_have_text(
+        "書き出しを具体例から始めてください")
+    expect(page.locator(".comment-card")).to_contain_text("（編集済み）")
+    assert storage.load_session(sid)["comments"][0]["text"] \
+        == "書き出しを具体例から始めてください"
+
+
+def test_comment_edit_can_be_cancelled(review):
+    page, sid = review
+    cid = _add_comment(page, sid, "元のコメント")
+    page.click(f'button[data-edit="{cid}"]')
+    page.locator("textarea[data-edit-input]").fill("破棄される変更")
+    page.click("button[data-edit-cancel]")
+    expect(page.locator("textarea[data-edit-input]")).to_have_count(0)
+    expect(page.locator(".comment-card .body")).to_have_text("元のコメント")
+    assert storage.load_session(sid)["comments"][0]["text"] == "元のコメント"
+
+
+def test_comment_cannot_be_emptied(review):
+    """空にする操作は削除と区別され、編集フォームのまま留まる。"""
+    page, sid = review
+    cid = _add_comment(page, sid, "元のコメント")
+    page.click(f'button[data-edit="{cid}"]')
+    page.locator("textarea[data-edit-input]").fill("   ")
+    messages: list[str] = []
+    page.on("dialog", lambda d: (messages.append(d.message), d.accept()))
+    page.click(f'button[data-edit-save="{cid}"]')
+    expect(page.locator("textarea[data-edit-input]")).to_have_count(1)
+    assert storage.load_session(sid)["comments"][0]["text"] == "元のコメント"
+    assert messages and "空" in messages[0]
+
+
+def test_comment_delete_also_removes_highlight(review):
+    page, sid = review
+    cid = _add_comment(page, sid, "消すコメント")
+    expect(page.locator("#editor .cmt")).to_have_count(1)
+    page.on("dialog", lambda d: d.accept())
+    page.click(f'button[data-del="{cid}"]')
+    expect(page.locator(".comment-card")).to_have_count(0)
+    # 本文の黄色ハイライトも外れ、編集HTMLが保存し直される（孤児span対策）
+    expect(page.locator("#editor .cmt")).to_have_count(0)
+    wait_saved(page)
+    session = storage.load_session(sid)
+    assert session["comments"] == []
+    assert "data-cid" not in (session["revisions"][-1]["edited_html"] or "")
+
+
+def test_comment_delete_can_be_dismissed(review):
+    page, sid = review
+    cid = _add_comment(page, sid, "残すコメント")
+    page.on("dialog", lambda d: d.dismiss())
+    page.click(f'button[data-del="{cid}"]')
+    expect(page.locator(".comment-card")).to_have_count(1)
+    expect(page.locator("#editor .cmt")).to_have_count(1)
+    assert len(storage.load_session(sid)["comments"]) == 1
+
+
+def test_reply_can_be_edited_and_deleted(review):
+    page, sid = review
+    cid = _add_comment(page, sid, "指摘")
+    storage.add_reply(sid, cid, "AIの回答", author="ai")
+    expect(page.locator(".comment-card .reply")).to_contain_text(
+        "AIの回答", timeout=8000)
+    rid = storage.load_session(sid)["comments"][0]["replies"][0]["id"]
+
+    page.click(f'button[data-edit="{cid}|{rid}"]')
+    page.locator("textarea[data-edit-input]").fill("回答を直しました")
+    page.click(f'button[data-edit-save="{cid}|{rid}"]')
+    expect(page.locator(".comment-card .reply .body")).to_have_text(
+        "回答を直しました")
+    assert storage.load_session(sid)["comments"][0]["replies"][0]["text"] \
+        == "回答を直しました"
+
+    page.on("dialog", lambda d: d.accept())
+    page.click(f'button[data-del="{cid}|{rid}"]')
+    expect(page.locator(".comment-card .reply")).to_have_count(0)
+    session = storage.load_session(sid)
+    assert session["comments"][0]["replies"] == []
+    assert len(session["comments"]) == 1  # コメント本体は残る
+
+
+def test_polling_does_not_discard_edit_form(review):
+    """編集中はポーリングでの再描画を見送り、入力途中の文章を失わない。"""
+    page, sid = review
+    cid = _add_comment(page, sid, "元のコメント")
+    page.click(f'button[data-edit="{cid}"]')
+    page.locator("textarea[data-edit-input]").fill("入力途中の文章")
+    storage.add_reply(sid, cid, "AIの割り込み返信", author="ai")
+    page.wait_for_timeout(4000)  # ポーリング間隔(2.5秒)を跨ぐ
+    expect(page.locator("textarea[data-edit-input]")).to_have_value(
+        "入力途中の文章")
+    # 編集を確定すると、見送っていたAI返信も次のポーリングで取り込まれる
+    page.click(f'button[data-edit-save="{cid}"]')
+    expect(page.locator(".comment-card .reply")).to_contain_text(
+        "AIの割り込み返信", timeout=8000)
+
+
 def test_complete_button_sets_reviewed(review):
     page, sid = review
     page.click("#btn-complete")

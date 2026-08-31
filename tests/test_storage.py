@@ -93,6 +93,68 @@ def test_comment_revision_tracks_current():
     assert c["revision"] == 1
 
 
+def test_update_comment_and_reply():
+    s = storage.create_session("t", "d", "")
+    storage.add_comment(s["id"], "引用", "元のコメント", comment_id="c1")
+    r = storage.add_reply(s["id"], "c1", "元の返信", author="ai")
+    updated = storage.update_comment(s["id"], "c1", "直したコメント")
+    assert updated["text"] == "直したコメント"
+    assert updated["updated_at"]  # 編集済みの印が入る
+    upd_reply = storage.update_reply(s["id"], "c1", r["id"], "直した返信")
+    assert upd_reply["text"] == "直した返信"
+    loaded = storage.load_session(s["id"])
+    assert loaded["comments"][0]["text"] == "直したコメント"
+    assert loaded["comments"][0]["replies"][0]["text"] == "直した返信"
+
+
+def test_update_rejects_empty_text():
+    """空にする意図は削除なので、黙って空カードを残さず失敗させる。"""
+    s = storage.create_session("t", "d", "")
+    storage.add_comment(s["id"], "q", "元の本文", comment_id="c1")
+    r = storage.add_reply(s["id"], "c1", "元の返信", author="human")
+    with pytest.raises(ValueError):
+        storage.update_comment(s["id"], "c1", "   ")
+    with pytest.raises(ValueError):
+        storage.update_reply(s["id"], "c1", r["id"], "")
+    loaded = storage.load_session(s["id"])
+    assert loaded["comments"][0]["text"] == "元の本文"
+    assert loaded["comments"][0]["replies"][0]["text"] == "元の返信"
+
+
+def test_delete_comment_removes_thread():
+    s = storage.create_session("t", "d", "")
+    storage.add_comment(s["id"], "q", "1つ目", comment_id="c1")
+    storage.add_comment(s["id"], "q", "2つ目", comment_id="c2")
+    storage.add_reply(s["id"], "c1", "返信", author="ai")
+    storage.delete_comment(s["id"], "c1")
+    loaded = storage.load_session(s["id"])
+    assert [c["id"] for c in loaded["comments"]] == ["c2"]
+
+
+def test_delete_reply_keeps_comment():
+    s = storage.create_session("t", "d", "")
+    storage.add_comment(s["id"], "q", "t", comment_id="c1")
+    r1 = storage.add_reply(s["id"], "c1", "1つ目", author="ai")
+    storage.add_reply(s["id"], "c1", "2つ目", author="human")
+    storage.delete_reply(s["id"], "c1", r1["id"])
+    loaded = storage.load_session(s["id"])
+    assert len(loaded["comments"]) == 1
+    assert [r["text"] for r in loaded["comments"][0]["replies"]] == ["2つ目"]
+
+
+def test_update_delete_missing_target_raises():
+    s = storage.create_session("t", "d", "")
+    storage.add_comment(s["id"], "q", "t", comment_id="c1")
+    with pytest.raises(KeyError):
+        storage.update_comment(s["id"], "nope", "x")
+    with pytest.raises(KeyError):
+        storage.delete_comment(s["id"], "nope")
+    with pytest.raises(KeyError):
+        storage.update_reply(s["id"], "c1", "nope", "x")
+    with pytest.raises(KeyError):
+        storage.delete_reply(s["id"], "c1", "nope")
+
+
 def test_list_sessions_search_and_order():
     a = storage.create_session("x", "レポート校正", "/Users/me/prjA")
     b = storage.create_session("y", "ブログ記事", "/Users/me/prjB")

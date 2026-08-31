@@ -38,6 +38,7 @@
   let saveTimer = null;
   let draftCid = null;
   let activeCid = null;
+  let editing = null; // 編集中の対象 { cid, rid|null }
 
   async function initEditorView(id) {
     sid = id;
@@ -194,6 +195,45 @@
       : '<span class="who human">あなた</span>';
   }
 
+  /* ---------- コメント/返信の編集・削除 ---------- */
+  /* 対象は "コメントID" または "コメントID|返信ID" のキーで指す。
+     コメントIDは [A-Za-z0-9_-] に制限されているので "|" と衝突しない。 */
+  function targetKey(cid, rid) {
+    return esc(cid) + (rid ? '|' + esc(rid) : '');
+  }
+
+  function parseKey(key) {
+    const parts = String(key).split('|');
+    return { cid: parts[0], rid: parts[1] || null };
+  }
+
+  function isEditing(cid, rid) {
+    return !!editing && editing.cid === cid &&
+      (editing.rid || null) === (rid || null);
+  }
+
+  function editedMark(o) {
+    return o.updated_at ? '<span class="when">（編集済み）</span>' : '';
+  }
+
+  function editFormHtml(cid, rid, text) {
+    const key = targetKey(cid, rid);
+    return '<textarea class="edit-text" rows="3" data-edit-input="' + key +
+      '">' + esc(text) + '</textarea>' +
+      '<div class="card-actions edit-actions">' +
+      '<button class="primary" data-edit-save="' + key + '">保存</button>' +
+      '<button data-edit-cancel="1">キャンセル</button></div>';
+  }
+
+  function bodyHtml(cid, rid, o) {
+    if (isEditing(cid, rid)) return editFormHtml(cid, rid, o.text);
+    const key = targetKey(cid, rid);
+    return '<div class="body">' + esc(o.text) + '</div>' +
+      '<div class="card-actions">' +
+      '<button data-edit="' + key + '">編集</button>' +
+      '<button class="danger" data-del="' + key + '">削除</button></div>';
+  }
+
   function renderComments() {
     const list = $('#comment-list');
     if (!session.comments.length) {
@@ -205,7 +245,7 @@
       const replies = (c.replies || []).map((r) =>
         '<div class="reply">' + authorLabel(r.author) +
         '<span class="when">' + esc(fmtDate(r.created_at)) + '</span>' +
-        '<div class="body">' + esc(r.text) + '</div></div>'
+        editedMark(r) + bodyHtml(c.id, r.id, r) + '</div>'
       ).join('');
       return '<div class="comment-card' +
         (c.id === activeCid ? ' active' : '') +
@@ -213,7 +253,7 @@
         '<div class="quote">C' + (i + 1) + ': ' + esc(c.quote) + '</div>' +
         authorLabel(c.author) +
         '<span class="when">' + esc(fmtDate(c.created_at)) + '</span>' +
-        '<div class="body">' + esc(c.text) + '</div>' +
+        editedMark(c) + bodyHtml(c.id, null, c) +
         replies +
         '<div class="reply-row"><input placeholder="返信を入力" data-reply="' +
         esc(c.id) + '"><button data-send="' + esc(c.id) + '">送信</button></div>' +
@@ -221,7 +261,7 @@
     }).join('');
     list.querySelectorAll('.comment-card').forEach((card) => {
       card.addEventListener('click', (e) => {
-        if (e.target.closest('input,button')) return;
+        if (e.target.closest('input,button,textarea')) return;
         activateComment(card.dataset.cid, true);
       });
     });
@@ -233,6 +273,80 @@
         if (e.key === 'Enter' && !e.isComposing) sendReply(inp.dataset.reply);
       });
     });
+    list.querySelectorAll('button[data-edit]').forEach((btn) => {
+      btn.addEventListener('click', () => startEdit(btn.dataset.edit));
+    });
+    list.querySelectorAll('button[data-del]').forEach((btn) => {
+      btn.addEventListener('click', () => removeTarget(btn.dataset.del));
+    });
+    list.querySelectorAll('button[data-edit-save]').forEach((btn) => {
+      btn.addEventListener('click', () => saveEdit(btn.dataset.editSave));
+    });
+    list.querySelectorAll('button[data-edit-cancel]').forEach((btn) => {
+      btn.addEventListener('click', () => { editing = null; renderComments(); });
+    });
+  }
+
+  function startEdit(key) {
+    editing = parseKey(key);
+    renderComments();
+    const ta = document.querySelector('textarea[data-edit-input]');
+    if (ta) {
+      ta.focus();
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+    }
+  }
+
+  async function saveEdit(key) {
+    const t = parseKey(key);
+    const ta = document.querySelector('textarea[data-edit-input]');
+    const text = ta ? (ta.value || '').trim() : '';
+    if (!text) {
+      alert('本文を空にはできません。消す場合は「削除」を押してください');
+      return;
+    }
+    const base = '/api/sessions/' + sid + '/comments/' + t.cid;
+    const path = t.rid ? base + '/replies/' + t.rid + '/update' : base + '/update';
+    try {
+      const updated = await api(path, 'POST', { text: text });
+      const c = session.comments.find((x) => x.id === t.cid);
+      if (c && t.rid) {
+        const r = (c.replies || []).find((x) => x.id === t.rid);
+        if (r) Object.assign(r, updated);
+      } else if (c) {
+        Object.assign(c, updated);
+      }
+      editing = null;
+      renderComments();
+    } catch (e) {
+      alert('保存に失敗しました: ' + e.message);
+    }
+  }
+
+  async function removeTarget(key) {
+    const t = parseKey(key);
+    const label = t.rid ? 'この返信' : 'このコメント（返信も含む）';
+    if (!window.confirm(label + 'を削除します。よろしいですか？')) return;
+    const base = '/api/sessions/' + sid + '/comments/' + t.cid;
+    const path = t.rid ? base + '/replies/' + t.rid + '/delete' : base + '/delete';
+    try {
+      await api(path, 'POST', {});
+      const c = session.comments.find((x) => x.id === t.cid);
+      if (t.rid) {
+        if (c) c.replies = (c.replies || []).filter((x) => x.id !== t.rid);
+      } else {
+        session.comments = session.comments.filter((x) => x.id !== t.cid);
+        if (activeCid === t.cid) activeCid = null;
+        // 本文に残るハイライトを外し、編集HTMLを保存し直す（孤児span対策）
+        Tracker.unwrapComment(t.cid);
+        dirty = true;
+        await saveDoc();
+      }
+      if (editing && editing.cid === t.cid) editing = null;
+      renderComments();
+    } catch (e) {
+      alert('削除に失敗しました: ' + e.message);
+    }
   }
 
   async function sendReply(cid) {
@@ -288,7 +402,9 @@
       renderMeta();
     }
     const localC = JSON.stringify(session.comments);
-    if (JSON.stringify(remote.comments) !== localC && !sidebarBusy() && !draftCid) {
+    // 編集中(editing)は再描画するとフォームが消えるので取り込みを見送る
+    if (JSON.stringify(remote.comments) !== localC && !sidebarBusy() &&
+        !draftCid && !editing) {
       session.comments = remote.comments;
       renderComments();
     }
