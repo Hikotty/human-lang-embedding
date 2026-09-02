@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HTMLレビュー - human-lang-embedding</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/html-review.css">
+</head>
+<body>
+<div id="html-review-view">
+  <header id="topbar">
+    <div id="title-block">
+      <h1 id="doc-title">読み込み中…</h1>
+      <div id="doc-meta"></div>
+    </div>
+    <div id="actions">
+      <button id="btn-comment" title="選択範囲にコメントを付ける">💬 コメント</button>
+      <button id="btn-complete">✔ 校正完了</button>
+      <a class="nav-link" href="/" title="セッション一覧へ">一覧</a>
+      <a class="nav-link" href="/admin" title="全セッションの校正結果を見る">管理画面</a>
+    </div>
+  </header>
+  <main id="main">
+    <div id="frame-wrap">
+      <iframe id="doc-frame" sandbox="allow-same-origin"
+              title="レビュー対象のHTML"></iframe>
+    </div>
+    <aside id="sidebar">
+      <h2>コメント</h2>
+      <div class="hint">表示されたページの文字列を選択して「💬 コメント」を
+        押すと、その箇所にコメントを付けられます。</div>
+      <div id="comment-draft" hidden>
+        <div class="quote" id="draft-quote"></div>
+        <textarea id="draft-text" rows="3" placeholder="ここがこう、を入力"></textarea>
+        <div class="row">
+          <button id="draft-submit">追加</button>
+          <button id="draft-cancel" class="secondary">キャンセル</button>
+        </div>
+      </div>
+      <div id="comment-list"></div>
+    </aside>
+  </main>
+</div>
+<script src="/static/html-review.js"></script>
+</body>
+</html>

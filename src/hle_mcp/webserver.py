@@ -50,6 +50,21 @@ _CSP_HTML = (
     "img-src 'self' data:; connect-src 'self'; form-action 'none'; "
     "base-uri 'none'; frame-ancestors 'none'"
 )
+# HTMLレビューページ用。レビュー対象HTMLを同一オリジンのiframeで埋め込むため
+# frame-src 'self' を許可する（それ以外は _CSP_HTML と同一）。
+_CSP_HTML_REVIEW = (
+    "default-src 'none'; script-src 'self'; style-src 'self'; "
+    "img-src 'self' data:; connect-src 'self'; frame-src 'self'; "
+    "form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
+)
+# iframe内に表示するレビュー対象HTML用。見た目の再現に必要なインラインCSSと
+# data:画像のみ許可し、スクリプトは一切許可しない（iframeのsandbox属性でも
+# 二重に遮断される）。frame-ancestors 'self' で自オリジンからの埋め込みのみ許可。
+_CSP_FRAME_DOC = (
+    "default-src 'none'; style-src 'unsafe-inline'; "
+    "img-src 'self' data:; font-src data:; "
+    "form-action 'none'; base-uri 'none'; frame-ancestors 'self'"
+)
 # HTML以外（JSON・画像・静的アセット）はすべて禁止で足りる。
 _CSP_STRICT = "default-src 'none'; frame-ancestors 'none'"
 
@@ -105,13 +120,20 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json({"error": reason}, 403)
 
     # ---------- 共通レスポンス ----------
-    def _emit(self, body: bytes, ctype: str, status: int, csp: str) -> None:
+    def _emit(
+        self, body: bytes, ctype: str, status: int, csp: str,
+        frameable: bool = False,
+    ) -> None:
+        """レスポンスを送出する。frameable は同一オリジンのiframe埋め込みを
+        許可する（HTMLレビューの対象ドキュメント配信でのみ使う）。"""
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Security-Policy", csp)
         for name, value in _SECURITY_HEADERS:
+            if frameable and name == "X-Frame-Options":
+                value = "SAMEORIGIN"
             self.send_header(name, value)
         if self.close_connection:
             self.send_header("Connection", "close")
@@ -129,11 +151,12 @@ class _Handler(BaseHTTPRequestHandler):
     def _send_error_json(self, status: int, message: str) -> None:
         self._send_json({"error": message}, status)
 
-    def _send_file(self, path: Path) -> None:
+    def _send_file(self, path: Path, csp: str | None = None) -> None:
         if not path.is_file():
             self._send_error_json(404, "ファイルが見つかりません")
             return
-        csp = _CSP_HTML if path.suffix == ".html" else _CSP_STRICT
+        if csp is None:
+            csp = _CSP_HTML if path.suffix == ".html" else _CSP_STRICT
         self._emit(
             path.read_bytes(),
             _CONTENT_TYPES.get(path.suffix, "application/octet-stream"),
@@ -182,8 +205,21 @@ class _Handler(BaseHTTPRequestHandler):
     def _route_get(self) -> None:
         parsed = urlparse(self.path)
         parts = [p for p in parsed.path.split("/") if p]
-        if parsed.path == "/" or (len(parts) == 2 and parts[0] == "session"):
+        if parsed.path == "/":
             self._send_file(_STATIC_DIR / "index.html")
+        elif len(parts) == 2 and parts[0] == "session":
+            # モードで配信するページを分ける。存在しないIDは従来どおり
+            # index.html（app.jsが「見つかりません」を表示する）
+            try:
+                mode = storage.session_mode(storage.load_session(parts[1]))
+            except KeyError:
+                mode = "md"
+            if mode == "html":
+                self._send_file(
+                    _STATIC_DIR / "html-review.html", csp=_CSP_HTML_REVIEW
+                )
+            else:
+                self._send_file(_STATIC_DIR / "index.html")
         elif parsed.path == "/admin":
             self._send_file(_STATIC_DIR / "admin.html")
         elif len(parts) == 2 and parts[0] == "static":
@@ -191,6 +227,19 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_file(_STATIC_DIR / name)
         elif parsed.path == "/api/health":
             self._send_json({"app": APP_NAME, "ok": True})
+        elif len(parts) == 4 and parts[:2] == ["api", "sessions"] \
+                and parts[3] == "source":
+            # HTMLレビューの対象ドキュメント。iframeから読み込まれる。
+            s = storage.load_session(parts[2])
+            if storage.session_mode(s) != "html":
+                raise KeyError("HTMLレビューセッションではありません")
+            self._emit(
+                storage.current_revision(s)["base_text"].encode("utf-8"),
+                "text/html; charset=utf-8",
+                200,
+                _CSP_FRAME_DOC,
+                frameable=True,
+            )
         elif len(parts) == 5 and parts[:2] == ["api", "sessions"] \
                 and parts[3] == "files":
             storage.load_session(parts[2])  # 存在確認
@@ -247,6 +296,8 @@ class _Handler(BaseHTTPRequestHandler):
                 text=str(body.get("text", "")),
                 author=str(body.get("author", "human")),
                 comment_id=body.get("id"),
+                prefix=str(body.get("prefix", "") or ""),
+                suffix=str(body.get("suffix", "") or ""),
             )
             self._send_json(comment)
         elif parts[3] == "comments" and len(parts) == 6 and parts[5] == "replies":

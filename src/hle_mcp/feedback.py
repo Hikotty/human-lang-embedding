@@ -310,8 +310,55 @@ def compose_changes(paragraphs: list[_Paragraph]) -> list[dict[str, Any]]:
     return changes
 
 
+def build_html_feedback(session: dict[str, Any]) -> dict[str, Any]:
+    """HTMLレビューセッションのフィードバック構造を生成する。
+
+    HTML全文は意図的に含めない（AIのコンテキストを圧迫するため）。
+    AIは source_path のファイルを直接読み、各コメントの quote（選択された
+    レンダリング後テキスト）と prefix / suffix（選択の直前・直後の文脈）で
+    該当箇所を特定する。quote はソース上でタグを跨いでいる場合がある。
+    """
+    rev = session["revisions"][-1]
+    comment_numbers = {c["id"]: i for i, c in enumerate(session["comments"], 1)}
+    comments = [
+        {
+            "number": comment_numbers[c["id"]],
+            "id": c["id"],
+            "revision": c.get("revision", 0),
+            "quote": c.get("quote", ""),
+            "prefix": c.get("prefix", ""),
+            "suffix": c.get("suffix", ""),
+            "text": c.get("text", ""),
+            "author": c.get("author", "human"),
+            "created_at": c.get("created_at", ""),
+            "updated_at": c.get("updated_at", ""),
+            "replies": c.get("replies", []),
+        }
+        for c in session["comments"]
+    ]
+    return {
+        "session_id": session["id"],
+        "title": session["title"],
+        "workspace": session.get("workspace", ""),
+        "status": session["status"],
+        "mode": "html",
+        "revision_index": rev["index"],
+        "source_path": session.get("source_path", ""),
+        "comments": comments,
+        "note": (
+            "HTMLレビューのため本文は含まれない。source_path のファイルを"
+            "直接読み、各コメントの quote（選択テキスト）と prefix / suffix"
+            "（直前・直後の文脈）で該当箇所を特定して修正すること。"
+            "quote はレンダリング後のテキストで、HTMLソース上ではタグを"
+            "跨いでいる場合がある。"
+        ),
+    }
+
+
 def build_feedback(session: dict[str, Any]) -> dict[str, Any]:
     """セッション全体からAI向けフィードバック構造を生成する。"""
+    if session.get("mode") == "html":
+        return build_html_feedback(session)
     rev = session["revisions"][-1]
     base_text = rev["base_text"]
     html = rev.get("edited_html")
@@ -347,6 +394,7 @@ def build_feedback(session: dict[str, Any]) -> dict[str, Any]:
         "title": session["title"],
         "workspace": session.get("workspace", ""),
         "status": session["status"],
+        "mode": "md",
         "revision_index": rev["index"],
         "has_edits": bool(html),
         "original_text": original,

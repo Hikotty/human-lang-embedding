@@ -2,6 +2,12 @@
 
 AIが生成した文章を、人間がブラウザ上の**トラックチェンジ付きエディタ**（Wordの校正機能ライク）で校正し、その結果をAIにフィードバックするためのMCPサーバーです。削除・追加・コメントのラリーを繰り返すことで、AIのライティング精度を段階的に高めることを目的としています。
 
+マークダウン（トラックチェンジ編集）に加えて **HTMLファイルのレビュー**にも
+対応しています。HTMLはレンダリングされた見た目のまま表示され、人間は任意の
+箇所を範囲選択して「ここがこう」というコメントを付けます（本文編集はなし）。
+モードは `open_review` に渡すファイルの拡張子（`.html` / `.htm`）で自動的に
+切り替わります。
+
 ## ワークフロー
 
 ```
@@ -17,9 +23,25 @@ AI                             人間
 │ ─────────────────────────────▶│ 修正稿mdを再校正（以降繰り返し）
 ```
 
-`open_review` / `submit_revision` は本文の文字列ではなく**マークダウンファイルの
-パス**を受け取り、内容を直接読み込みます。MCPプロトコル越しに長文を往復させる
-必要がなく、AIはワークスペース上の `.md` を編集してパスを渡すだけで済みます。
+`open_review` / `submit_revision` は本文の文字列ではなく**ファイルのパス**を
+受け取り、内容を直接読み込みます。MCPプロトコル越しに長文を往復させる必要が
+なく、AIはワークスペース上のファイルを編集してパスを渡すだけで済みます。
+
+HTMLレビューの場合は、`get_feedback` も本文を返さずコメント（選択テキストと
+前後の文脈）だけを返し、AIは `source_path` のファイルを自分で読みます。
+
+```
+AI                             人間
+│ open_review(/path/x.html)    │
+│ ─────────────────────────────▶│ レンダリング表示された図解・記事を閲覧
+│                               │ 気になる箇所を範囲選択してコメント
+│                               │ 「校正完了」→ チャットでAIに連絡
+│ get_feedback(id)              │
+│ ◀─────────────────────────────│ quote + prefix/suffix + コメント本文を受領
+│ （source_path のHTMLを直接読む） │
+│ submit_revision(/path/x2.html)│
+│ ─────────────────────────────▶│ 修正版を再レビュー（以降繰り返し）
+```
 
 ## 画面イメージ
 
@@ -38,6 +60,7 @@ AI                             人間
 - **日本語IME対応**: 変換確定した文字列が正しく「追加」として記録される
 - **コメント**: 任意の選択範囲にコメントを付与。右サイドバーに表示され、返信・返信への返信が可能。AIも `reply_comment` で参加できる。コメント・返信はあとから編集・削除でき、削除すると本文のハイライトも外れる
 - **画像**: md内の `![説明](パス)` 形式のローカル画像参照は、mdファイルの場所（次いでワークスペースルート。Zennの `/images/...` 形式にも対応）を基準に自動で解決・添付され、インライン表示される。解決できない参照は `missing_images` で報告。`images` パラメータで追加添付も可能。人間も🖼ボタン/ペーストで画像を追加でき、クリック+Backspaceで削除指定できる（すべて変更として追跡）
+- **HTMLレビュー**: `.html` を渡すとレンダリング表示+範囲選択コメントのモードで開く。選択範囲は quote（選択テキスト）と prefix / suffix（前後の文脈）で保存され、同じ文言が複数あっても位置を特定できる。コメント範囲はDOMを書き換えずにハイライト表示（CSS Custom Highlight API）。対象HTML内のスクリプトは実行されない（[セキュリティ](#セキュリティ)）
 - **複数ラリー**: `submit_revision` で修正稿を積み重ねる。過去のリビジョンは差分要約に圧縮して保存
 - **検索**: ID・タイトル・ワークスペースパスでセッションを検索
 - **管理画面**: 全セッションの校正結果（注釈付きテキスト・コメントスレッド・過去稿の差分）を一覧・閲覧
@@ -70,9 +93,9 @@ uv run playwright install chromium   # E2Eテストを動かす場合のみ
 
 | ツール | 役割 | 主な引数 |
 |---|---|---|
-| `open_review` | mdファイルを読み込んで校正セッションを作成しブラウザでエディタを開く | `file_path`, `title`, `workspace`, `images` |
+| `open_review` | md / htmlファイルを読み込んで校正セッションを作成しブラウザでレビュー画面を開く（拡張子でモード判定） | `file_path`, `title`, `workspace`, `images` |
 | `get_feedback` | 校正結果（削除・追加・コメント）を取得 | `session_id` |
-| `submit_revision` | 修正稿のmdファイルを新リビジョンとして提示 | `session_id`, `file_path`, `open_browser`, `images` |
+| `submit_revision` | 修正稿のファイルを新リビジョンとして提示（セッションとモードを揃える） | `session_id`, `file_path`, `open_browser`, `images` |
 | `reply_comment` | コメントスレッドにAIとして返信 | `session_id`, `comment_id`, `message` |
 | `list_reviews` | セッションを検索 | `query`, `workspace`, `limit` |
 | `get_review` | セッション詳細（全リビジョン・全コメント） | `session_id` |
@@ -104,11 +127,40 @@ uv run playwright install chromium   # E2Eテストを動かす場合のみ
 使ってください**（`reply_comment` も `comment_id` を取ります）。番号が変わって
 いる可能性がある場合は `get_feedback` を取り直してください。
 
+### HTMLレビューのフィードバック（コンテキストの渡し方）
+
+HTMLモードの `get_feedback` は **HTML全文を返しません**（数百KBの図解HTMLを
+MCP越しに往復させるとAIのコンテキストを圧迫するため）。代わりに次を返します。
+
+```json
+{
+  "mode": "html",
+  "source_path": "/path/to/diagram.html",
+  "comments": [{
+    "number": 1, "id": "c...",
+    "quote": "選択されたテキスト",
+    "prefix": "選択の直前50文字",
+    "suffix": "選択の直後50文字",
+    "text": "ここがこう、というコメント", "replies": []
+  }]
+}
+```
+
+AIは `source_path` のファイルを自分で直接読み、`quote` + `prefix` / `suffix`
+で該当箇所を特定して修正します。注意点が2つあります。
+
+- `quote` は**レンダリング後のテキスト**なので、HTMLソース上ではタグを
+  跨いでいることがあります（quote「重要な点」← ソース `<b>重要</b>な点`）。
+  quote がソースにそのまま見つからない場合はタグを挟んだ形で探すこと
+- 同じ文言が複数箇所にある場合は `prefix` / `suffix` の文脈で絞り込むこと。
+  ブラウザ側のハイライト復元も同じロジック（完全一致 → 文脈の一致長で選択）
+  で動いています
+
 ## 画面
 
 | URL | 内容 |
 |---|---|
-| `/session/<ID>` | 校正エディタ（`open_review` が自動で開く） |
+| `/session/<ID>` | レビュー画面（`open_review` が自動で開く）。mdセッションは校正エディタ、htmlセッションはHTMLレビューページが配信される |
 | `/` | セッション一覧（ID・タイトル・ワークスペースで検索） |
 | `/admin` | 管理画面。全セッションの校正結果・コメント・過去稿の差分要約を閲覧 |
 
@@ -123,6 +175,16 @@ uv run playwright install chromium   # E2Eテストを動かす場合のみ
 - **画像追加**: 「🖼 画像」ボタンまたは画像のペースト → カーソル位置に挿入
 - **画像削除**: 画像をクリックして選択 → Backspace（もう一度で取り消し）
 - **元に戻す/やり直す**: Cmd+Z / Cmd+Shift+Z
+- **校正完了**: ヘッダーの「✔ 校正完了」を押し、チャットでAIに完了を伝える
+
+### HTMLレビューの操作方法
+
+- **コメント**: 表示されたページの文字列（インラインSVG内のテキストも可）を
+  ドラッグで選択して「💬 コメント」→ 右サイドバーで入力。本文の編集はできない
+- **ハイライト**: コメント済みの範囲は黄色でハイライトされる。本文側を
+  クリックすると対応するコメントカードが、カードをクリックすると本文の
+  該当箇所がハイライト・スクロールされる
+- **返信・編集・削除**: mdエディタと同じ操作（AIも `reply_comment` で参加）
 - **校正完了**: ヘッダーの「✔ 校正完了」を押し、チャットでAIに完了を伝える
 
 ### マークダウンの表示方針
@@ -173,12 +235,17 @@ data/
 └── files/<セッションID>/          # 添付画像
 ```
 
-セッションJSONは ID・タイトル・ワークスペースパス・ステータス・
-リビジョン配列・コメント配列を持ちます。データ増加を緩やかにするため、
-**編集中の現行リビジョンだけが全文HTML（`edited_html`）を持ち、
+セッションJSONは ID・タイトル・ワークスペースパス・モード（`mode`: md / html）・
+入力元ファイルパス（`source_path`）・ステータス・リビジョン配列・コメント配列を
+持ちます（`mode` を持たない旧データは md 扱い）。mdモードではデータ増加を
+緩やかにするため、**編集中の現行リビジョンだけが全文HTML（`edited_html`）を持ち、
 `submit_revision` で確定した過去リビジョンは差分要約
 （`feedback_summary`: annotated_text / result_text / changes）に圧縮**され、
 全文HTMLは破棄されます。原文は各リビジョンの `base_text` から常に復元できます。
+
+htmlモードは本文編集がないため `edited_html` は常に空で、`base_text` に対象HTML
+そのものが入ります。コメントには選択範囲の前後の文脈（`prefix` / `suffix`）が
+付きます。
 
 ## 環境変数
 
@@ -208,6 +275,8 @@ Webサーバーは `127.0.0.1` にのみバインドし、認証機構は持ち�
 | CSP（`default-src 'none'` ベース、インラインなし）+ `nosniff` + `X-Frame-Options: DENY` | 万一HTMLが注入された場合のスクリプト実行、MIMEスニッフィング、フレーム埋め込み |
 | コメントIDを `[A-Za-z0-9_-]{1,64}` に制限 + HTMLエスケープで引用符も対象 | `data-cid` 属性を抜け出す属性インジェクションXSS |
 | `annotated_text` のマーカーエスケープ | 本文の `【】` によるAIの差分誤読、および注釈への指示混入 |
+| HTMLレビュー: `sandbox="allow-same-origin"`（`allow-scripts` なし）のiframe + 専用CSP（`default-src 'none'` でスクリプト不許可、`style-src 'unsafe-inline'` のみ許可）で二重にスクリプトを遮断 | レビュー対象HTML内の悪性スクリプト実行。表示に必要なインラインCSSは通す |
+| レビュー対象HTMLの配信（`/api/sessions/<ID>/source`）だけ `X-Frame-Options: SAMEORIGIN` + `frame-ancestors 'self'`、他は従来どおり `DENY` | 外部サイトからのフレーム埋め込み（クリックジャッキング） |
 
 `Origin` ヘッダを送らないクライアント（ローカルCLI・テスト）は許可しています。
 CSRFはブラウザ由来の脅威であり、ローカルプロセスは `data/` を直接読めるため、
@@ -258,6 +327,12 @@ uv run pytest --ignore=tests/e2e   # ユニット/統合のみ
   `--host-resolver-rules=MAP evil.test 127.0.0.1` で起動してDNS
   リバインディング成立後の状態を作り、ループバック上の別ポートに攻撃者
   サイトを立ててCSRFを再現する。CSP違反が1件も出ないことも確認する
+- `tests/e2e/test_html_review.py` … HTMLレビューの実ブラウザ検証。対象HTML内の
+  `<script>` が実行されないこと（`window.__pwned` が undefined、`document.title`
+  が書き換えられていないこと）とインラインCSSが効いていることを同時に確認し、
+  範囲選択→コメントで `quote` / `prefix` / `suffix` が保存されること、
+  ハイライトの描画と削除、インラインSVG内テキストの選択、AI返信のポーリング
+  反映、CSP違反が出ないことを検証する
 
 > Chromiumの Private Network Access は public→loopback の `fetch` を先に
 > 遮断するため、攻撃者ページをループバック上に置かないとサーバー側の
@@ -268,10 +343,17 @@ uv run pytest --ignore=tests/e2e   # ユニット/統合のみ
 
 ```
 src/hle_mcp/
-├── server.py      # MCPサーバー本体（ツール定義）
-├── webserver.py   # ローカルWebサーバー（UI配信 + JSON API）
+├── server.py      # MCPサーバー本体（ツール定義、md/htmlモード判定）
+├── webserver.py   # ローカルWebサーバー（UI配信 + JSON API + CSP）
 ├── storage.py     # セッション/画像の永続化・検索・リビジョン圧縮
-├── feedback.py    # 編集HTML → フィードバック抽出
+├── feedback.py    # 編集HTML → フィードバック抽出（md/htmlで構造が異なる）
 ├── admin.py       # hle-admin CLI
-└── static/        # エディタUI（index.html / tracker.js / app.js / admin.*）
+└── static/
+    ├── index.html / tracker.js / app.js   # mdトラックチェンジエディタ
+    ├── html-review.html / .js / .css      # HTMLレビューページ
+    └── admin.html / admin.js / style.css  # 管理画面・共通スタイル
 ```
+
+HTMLレビューは既存のmdエディタ（index.html / app.js / tracker.js）に
+一切手を入れず、`/session/<ID>` の配信時にセッションのモードを見て
+ページを出し分ける方式で追加されています。

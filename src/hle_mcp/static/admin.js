@@ -107,6 +107,16 @@
         api('/api/sessions/' + sid),
         api('/api/sessions/' + sid + '/feedback'),
       ]);
+      if (fb.mode === 'html') {
+        // HTMLレビューは本文編集がないため、コメントだけを表示する
+        container.innerHTML =
+          '<div class="meta">HTMLレビュー（第' + (fb.revision_index + 1) +
+          '稿）' + (fb.source_path ? '　' + esc(fb.source_path) : '') +
+          '</div>' +
+          '<h4>コメント (' + fb.comments.length + ')</h4>' +
+          renderComments(fb.comments);
+        return;
+      }
       const past = renderRevisions(session);
       container.innerHTML =
         (past ? '<h4>過去リビジョンの校正（差分要約）</h4>' + past : '') +

@@ -51,8 +51,20 @@ def _session_path(session_id: str) -> Path:
     return sessions_dir() / f"{session_id}.json"
 
 
-def create_session(text: str, title: str, workspace: str = "") -> dict[str, Any]:
-    """新しいレビューセッションを作成して保存する。"""
+def create_session(
+    text: str,
+    title: str,
+    workspace: str = "",
+    mode: str = "md",
+    source_path: str = "",
+) -> dict[str, Any]:
+    """新しいレビューセッションを作成して保存する。
+
+    mode は "md"（トラックチェンジ編集）または "html"（表示+範囲選択コメント）。
+    source_path は入力元ファイルの絶対パス（AIがフィードバック時に直接読む）。
+    """
+    if mode not in ("md", "html"):
+        raise ValueError(f"不正なモード: {mode}")
     with _LOCK:
         sid = _new_id()
         while _session_path(sid).exists():
@@ -62,6 +74,8 @@ def create_session(text: str, title: str, workspace: str = "") -> dict[str, Any]
             "id": sid,
             "title": title,
             "workspace": workspace,
+            "mode": mode,
+            "source_path": source_path,
             "created_at": now,
             "updated_at": now,
             "status": "editing",
@@ -72,6 +86,11 @@ def create_session(text: str, title: str, workspace: str = "") -> dict[str, Any]
         }
         _write(session)
         return session
+
+
+def session_mode(session: dict[str, Any]) -> str:
+    """セッションのモードを返す（旧データは "md" 扱い）。"""
+    return session.get("mode", "md")
 
 
 def load_session(session_id: str) -> dict[str, Any]:
@@ -178,10 +197,13 @@ def _compact_revision(session: dict[str, Any]) -> None:
         rev["edited_html"] = None
 
 
-def add_revision(session_id: str, text: str) -> dict[str, Any]:
+def add_revision(
+    session_id: str, text: str, source_path: str | None = None
+) -> dict[str, Any]:
     """AIによる修正稿を新リビジョンとして追加し、ステータスを editing に戻す。
 
     直前のリビジョンは差分要約に圧縮される（edited_html は破棄）。
+    source_path を渡すと入力元ファイルパスを更新する。
     """
     with _LOCK:
         s = load_session(session_id)
@@ -194,6 +216,8 @@ def add_revision(session_id: str, text: str) -> dict[str, Any]:
                 "created_at": _now(),
             }
         )
+        if source_path is not None:
+            s["source_path"] = source_path
         s["status"] = "editing"
         save_session(s)
         return s
@@ -205,11 +229,15 @@ def add_comment(
     text: str,
     author: str = "human",
     comment_id: str | None = None,
+    prefix: str = "",
+    suffix: str = "",
 ) -> dict[str, Any]:
     """コメントを追加する。comment_id はブラウザ側で採番したIDを受け入れる。
 
     comment_id は HTML の data-cid 属性やCSSセレクタに埋め込まれるため、
     英数字・ハイフン・アンダースコアのみに制限する（属性インジェクション防止）。
+    prefix / suffix は選択範囲の前後の文脈テキスト（HTMLレビューで、同じ
+    quote が複数箇所に現れても位置を特定できるようにするためのもの）。
     """
     with _LOCK:
         s = load_session(session_id)
@@ -227,6 +255,9 @@ def add_comment(
             "created_at": _now(),
             "replies": [],
         }
+        if prefix or suffix:
+            comment["prefix"] = str(prefix)
+            comment["suffix"] = str(suffix)
         s["comments"].append(comment)
         save_session(s)
         return comment
