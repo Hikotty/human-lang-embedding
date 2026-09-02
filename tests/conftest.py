@@ -40,3 +40,16 @@ def png_file(tmp_path):
     p = tmp_path / "figure.png"
     p.write_bytes(PNG_1PX)
     return p
+
+
+@pytest.fixture()
+def write_md(tmp_path):
+    """本文をmdファイルに書き出してパス（文字列）を返すファクトリ。"""
+
+    def _write(text: str, name: str = "doc.md") -> str:
+        p = tmp_path / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+        return str(p)
+
+    return _write
