@@ -7,6 +7,7 @@
  *   改行追加    : <ins class="pb" data-pb="ins">¶</ins>（段落末尾）
  *   改行削除    : <del class="pb" data-pb="del">¶</del>（段落末尾）
  *   コメント範囲: <span class="cmt" data-cid="...">
+ *   画像コメント: <p class="img-para" data-cids="cid1 cid2">
  */
 (function () {
   'use strict';
@@ -15,6 +16,7 @@
   let onChangeCb = null;
   let sessionId = '';
   let onImageFileCb = null;
+  let onImageCommentsDroppedCb = null;
   let selectedImg = null; // 選択中の画像段落
   const undoStack = [];
   const redoStack = [];
@@ -437,10 +439,29 @@
     return true;
   }
 
+  /* 選択中の画像段落にコメントIDを結び付ける。
+     画像は contenteditable=false のひとかたまりで、逆変換も画像段落の中身を
+     読まない（feedback.py）ため <span class="cmt"> では包めない。
+     そのため段落自身の data-cids にスペース区切りで持たせる。 */
+  function addImageComment(cid) {
+    if (!selectedImg || !selectedImg.isConnected) return false;
+    snapshot();
+    const cids = imageCids(selectedImg);
+    if (!cids.includes(cid)) cids.push(cid);
+    selectedImg.dataset.cids = cids.join(' ');
+    changed();
+    return true;
+  }
+
   function unwrapComment(cid) {
     editor.querySelectorAll('span.cmt[data-cid="' + cid + '"]').forEach((span) => {
       while (span.firstChild) span.parentNode.insertBefore(span.firstChild, span);
       span.remove();
+    });
+    editor.querySelectorAll('.img-para[data-cids~="' + cid + '"]').forEach((p) => {
+      const rest = imageCids(p).filter((x) => x !== cid);
+      if (rest.length) p.dataset.cids = rest.join(' ');
+      else delete p.dataset.cids;
     });
     changed();
   }
@@ -574,6 +595,9 @@
     const p = e.target.closest && e.target.closest('.img-para');
     if (p && editor.contains(p)) {
       selectImage(p);
+      // 直前の文字列選択が残るとコメント対象が曖昧になるので畳む
+      const sel = window.getSelection();
+      if (sel && sel.rangeCount && !sel.isCollapsed) sel.collapseToEnd();
       editor.focus();
     } else {
       selectImage(null);
@@ -607,12 +631,32 @@
     if (p) p.classList.add('sel');
   }
 
+  function imageCids(p) {
+    return String((p && p.dataset.cids) || '').split(/\s+/).filter(Boolean);
+  }
+
+  /* 選択中の画像段落の情報を返す（コメント対象の指定に使う） */
+  function getSelectedImage() {
+    if (!selectedImg || !selectedImg.isConnected) return null;
+    const name = selectedImg.dataset.img || '';
+    return {
+      name: name,
+      md: selectedImg.dataset.md || ('![](' + name + ')'),
+      cids: imageCids(selectedImg),
+    };
+  }
+
   function toggleImageDeleted(p) {
     snapshot();
     if (p.dataset.ins) {
-      // 自分（人間）が追加した画像は痕跡なく削除
+      // 自分（人間）が追加した画像は痕跡なく削除。付いていたコメントは
+      // 参照先を失うので、呼び出し側に消してもらう
+      const orphans = imageCids(p);
       selectImage(null);
       p.remove();
+      if (orphans.length && onImageCommentsDroppedCb) {
+        onImageCommentsDroppedCb(orphans);
+      }
     } else if (p.dataset.del) {
       delete p.dataset.del;
     } else {
@@ -754,6 +798,7 @@
     onChangeCb = onChange;
     sessionId = (opts && opts.sessionId) || '';
     onImageFileCb = (opts && opts.onImageFile) || null;
+    onImageCommentsDroppedCb = (opts && opts.onImageCommentsDropped) || null;
     if (savedHtml) {
       editor.innerHTML = savedHtml;
     } else {
@@ -771,15 +816,17 @@
     undo: undo,
     redo: redo,
     wrapRangeComment: wrapRangeComment,
+    addImageComment: addImageComment,
     unwrapComment: unwrapComment,
     insertImageParagraph: insertImageParagraph,
+    getSelectedImage: getSelectedImage,
     getRange: getRange,
     html: function () {
       if (!editor) return '';
-      // 選択状態(sel)は保存しない
+      // 選択・強調といった一時的な表示状態は保存しない
       const clone = editor.cloneNode(true);
-      clone.querySelectorAll('.img-para.sel').forEach(function (p) {
-        p.classList.remove('sel');
+      clone.querySelectorAll('.sel, .active, .cmt-active').forEach(function (el) {
+        el.classList.remove('sel', 'active', 'cmt-active');
       });
       return clone.innerHTML;
     }

@@ -65,7 +65,7 @@ class _Paragraph:
         self.segments: list[_Segment] = []
         self.pb_ins = False  # 段落末尾に「改行追加」マーカーがある
         self.pb_del = False  # 段落末尾に「改行削除」マーカーがある
-        # 画像段落の場合 {"name", "md", "del", "ins"} を持つ
+        # 画像段落の場合 {"name", "md", "del", "ins", "cids"} を持つ
         self.img: dict[str, Any] | None = None
 
 
@@ -104,6 +104,9 @@ class _EditParser(HTMLParser):
                     "md": d.get("data-md") or f"![]({name})",
                     "del": d.get("data-del") == "1",
                     "ins": d.get("data-ins") == "1",
+                    # 画像は <span class="cmt"> で包めないので、コメントIDは
+                    # 段落の data-cids（スペース区切り）で結び付けられている
+                    "cids": tuple((d.get("data-cids") or "").split()),
                 }
         elif tag in ("del", "ins"):
             if self._is_pb(attrs):
@@ -235,11 +238,22 @@ def compose_annotated(
         if para.img is not None:
             name = escape_markers(para.img["name"])
             if para.img["del"]:
-                lines.append(f"【画像削除:{name}】")
+                body = f"【画像削除:{name}】"
             elif para.img["ins"]:
-                lines.append(f"【画像追加:{name}】")
+                body = f"【画像追加:{name}】"
             else:
-                lines.append(escape_markers(para.img["md"]))
+                body = escape_markers(para.img["md"])
+            # 画像そのものに付いたコメントは画像行全体を範囲として示す
+            nums = [
+                n
+                for n in (
+                    comment_numbers.get(cid) for cid in para.img.get("cids", ())
+                )
+                if n
+            ]
+            opened = "".join(f"〖C{n}〗" for n in nums)
+            closed = "".join(f"〖/C{n}〗" for n in reversed(nums))
+            lines.append(f"{opened}{body}{closed}")
             continue
         buf: list[str] = []
         open_cids: list[str] = []
@@ -310,6 +324,33 @@ def compose_changes(paragraphs: list[_Paragraph]) -> list[dict[str, Any]]:
     return changes
 
 
+def _comment_view(comment: dict[str, Any], number: int) -> dict[str, Any]:
+    """コメント1件をAI向けの形に整える。
+
+    target="image" は文字列ではなく画像そのものへの指摘。image が対象の名前
+    （mdモードでは添付画像のファイル名）、image_ref はHTMLレビューで対象要素を
+    「タグ名:出現順」で指すアンカー。
+    """
+    view = {
+        "number": number,
+        "id": comment["id"],
+        "revision": comment.get("revision", 0),
+        "quote": comment.get("quote", ""),
+        "text": comment.get("text", ""),
+        "author": comment.get("author", "human"),
+        "created_at": comment.get("created_at", ""),
+        # 人間が後から書き換えたコメントには updated_at が入る
+        "updated_at": comment.get("updated_at", ""),
+        "target": comment.get("target", "text"),
+        "replies": comment.get("replies", []),
+    }
+    if view["target"] == "image":
+        view["image"] = comment.get("image", "")
+        if comment.get("image_ref"):
+            view["image_ref"] = comment["image_ref"]
+    return view
+
+
 def build_html_feedback(session: dict[str, Any]) -> dict[str, Any]:
     """HTMLレビューセッションのフィードバック構造を生成する。
 
@@ -320,22 +361,12 @@ def build_html_feedback(session: dict[str, Any]) -> dict[str, Any]:
     """
     rev = session["revisions"][-1]
     comment_numbers = {c["id"]: i for i, c in enumerate(session["comments"], 1)}
-    comments = [
-        {
-            "number": comment_numbers[c["id"]],
-            "id": c["id"],
-            "revision": c.get("revision", 0),
-            "quote": c.get("quote", ""),
-            "prefix": c.get("prefix", ""),
-            "suffix": c.get("suffix", ""),
-            "text": c.get("text", ""),
-            "author": c.get("author", "human"),
-            "created_at": c.get("created_at", ""),
-            "updated_at": c.get("updated_at", ""),
-            "replies": c.get("replies", []),
-        }
-        for c in session["comments"]
-    ]
+    comments = []
+    for c in session["comments"]:
+        view = _comment_view(c, comment_numbers[c["id"]])
+        view["prefix"] = c.get("prefix", "")
+        view["suffix"] = c.get("suffix", "")
+        comments.append(view)
     return {
         "session_id": session["id"],
         "title": session["title"],
@@ -351,6 +382,9 @@ def build_html_feedback(session: dict[str, Any]) -> dict[str, Any]:
             "（直前・直後の文脈）で該当箇所を特定して修正すること。"
             "quote はレンダリング後のテキストで、HTMLソース上ではタグを"
             "跨いでいる場合がある。"
+            'target="image" のコメントは画像や図そのものへの指摘で、'
+            "image_ref が対象要素を「タグ名:出現順（0起点）」で指す"
+            "（例 img:2 はソース中3番目の <img>、svg:0 は最初の <svg>）。"
         ),
     }
 
@@ -375,19 +409,7 @@ def build_feedback(session: dict[str, Any]) -> dict[str, Any]:
         annotated = escape_markers(base_text)
         changes = []
     comments = [
-        {
-            "number": comment_numbers[c["id"]],
-            "id": c["id"],
-            "revision": c.get("revision", 0),
-            "quote": c.get("quote", ""),
-            "text": c.get("text", ""),
-            "author": c.get("author", "human"),
-            "created_at": c.get("created_at", ""),
-            # 人間が後から書き換えたコメントには updated_at が入る
-            "updated_at": c.get("updated_at", ""),
-            "replies": c.get("replies", []),
-        }
-        for c in session["comments"]
+        _comment_view(c, comment_numbers[c["id"]]) for c in session["comments"]
     ]
     return {
         "session_id": session["id"],

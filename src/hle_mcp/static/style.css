@@ -141,6 +141,16 @@ html, body {
   padding: 2px 6px; margin-bottom: 6px; background: #fffbec;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* 画像コメントは何を指しているか分かるようサムネイルを添える */
+.comment-card .quote.img-quote {
+  display: flex; align-items: center; gap: 6px; white-space: normal;
+}
+.comment-card .quote.img-quote img {
+  width: 46px; height: 32px; object-fit: cover; border-radius: 3px; flex: none;
+}
+.comment-card .quote.img-quote span {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .comment-card .who { font-weight: 700; font-size: 11px; margin-right: 6px; }
 .comment-card .who.ai { color: #1967d2; }
 .comment-card .who.human { color: #b06000; }
@@ -223,6 +233,14 @@ html, body {
 #editor .img-para .img-caption {
   display: block; font-size: 11px; color: #9aa0a6; margin-top: 2px;
 }
+/* コメントが付いた画像。テキストのハイライトと同じ黄色で揃える */
+#editor .img-para[data-cids] {
+  border-style: solid; border-color: #f9ab00; background: #fffbec;
+}
+#editor .img-para[data-cids]::before {
+  content: "💬"; position: absolute; top: 3px; right: 5px; font-size: 12px;
+}
+#editor .img-para.cmt-active { border-color: #f57c00; background: #feefc3; }
 #editor .img-para.sel { border-color: #1a73e8; background: #e8f0fe; }
 #editor .img-para[data-del="1"] img { opacity: .35; }
 #editor .img-para[data-del="1"] {

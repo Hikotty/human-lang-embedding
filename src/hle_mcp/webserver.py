@@ -298,6 +298,9 @@ class _Handler(BaseHTTPRequestHandler):
                 comment_id=body.get("id"),
                 prefix=str(body.get("prefix", "") or ""),
                 suffix=str(body.get("suffix", "") or ""),
+                target=str(body.get("target", "") or "text"),
+                image=str(body.get("image", "") or ""),
+                image_ref=str(body.get("image_ref", "") or ""),
             )
             self._send_json(comment)
         elif parts[3] == "comments" and len(parts) == 6 and parts[5] == "replies":

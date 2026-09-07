@@ -223,6 +223,11 @@ def add_revision(
         return s
 
 
+COMMENT_TARGETS = ("text", "image")
+# 画像アンカー（HTMLレビュー用）。"img:2" のようにタグ名と出現順で指す。
+_IMAGE_REF_PATTERN = r"[A-Za-z][A-Za-z0-9-]{0,31}:\d{1,6}"
+
+
 def add_comment(
     session_id: str,
     quote: str,
@@ -231,6 +236,9 @@ def add_comment(
     comment_id: str | None = None,
     prefix: str = "",
     suffix: str = "",
+    target: str = "text",
+    image: str = "",
+    image_ref: str = "",
 ) -> dict[str, Any]:
     """コメントを追加する。comment_id はブラウザ側で採番したIDを受け入れる。
 
@@ -238,7 +246,23 @@ def add_comment(
     英数字・ハイフン・アンダースコアのみに制限する（属性インジェクション防止）。
     prefix / suffix は選択範囲の前後の文脈テキスト（HTMLレビューで、同じ
     quote が複数箇所に現れても位置を特定できるようにするためのもの）。
+
+    target="image" は文字列ではなく画像そのものへのコメント。
+    image は対象を表す名前（mdモードでは添付画像の保存ファイル名。URLに
+    埋め込むためベース名へ正規化する）、image_ref はHTMLレビューで対象要素を
+    「タグ名:出現順」で指すアンカーで、DOM検索に使うため書式を制限する。
     """
+    if target not in COMMENT_TARGETS:
+        raise ValueError(
+            f"不正なコメント対象: {target!r} "
+            f"(対応: {', '.join(COMMENT_TARGETS)})"
+        )
+    name = Path(str(image)).name[:200]
+    ref = str(image_ref)
+    if ref and not re.fullmatch(_IMAGE_REF_PATTERN, ref):
+        raise ValueError(f"不正な画像アンカー: {image_ref!r}")
+    if target == "image" and not (name or ref):
+        raise ValueError("画像コメントには image か image_ref が必要です")
     with _LOCK:
         s = load_session(session_id)
         cid = comment_id or _new_id("c")
@@ -258,6 +282,13 @@ def add_comment(
         if prefix or suffix:
             comment["prefix"] = str(prefix)
             comment["suffix"] = str(suffix)
+        # 既定（テキストへのコメント）ではキーを増やさず、従来の形を保つ
+        if target != "text":
+            comment["target"] = target
+        if name:
+            comment["image"] = name
+        if ref:
+            comment["image_ref"] = ref
         s["comments"].append(comment)
         save_session(s)
         return comment

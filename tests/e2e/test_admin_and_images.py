@@ -153,3 +153,106 @@ def test_admin_search_filters(browser, web_port):
     expect(page.locator(".admin-card h3")).to_have_text("ベータ記事",
                                                         timeout=5000)
     context.close()
+
+
+# ---------- 画像へのコメント ----------
+
+def add_image_comment(page, text: str) -> None:
+    """画像を選んだ状態でコメントを追加する。"""
+    page.click("#btn-comment")
+    expect(page.locator("#comment-draft")).to_be_visible()
+    page.fill("#draft-text", text)
+    page.click("#draft-submit")
+
+
+def test_image_itself_can_be_commented(image_review):
+    """画像をクリックで指定して、その画像自体にコメントを付けられる。"""
+    page, sid = image_review
+    para = page.locator("#editor .img-para")
+    para.click()
+    page.click("#btn-comment")
+    # 下書きの対象表示が画像であることが分かる
+    expect(page.locator("#draft-quote")).to_have_text("🖼 zu1.png")
+    page.fill("#draft-text", "この図は配色を直してほしい")
+    page.click("#draft-submit")
+    expect(page.locator(".comment-card")).to_have_count(1)
+    # サイドバーにサムネイルが出る
+    expect(page.locator(".comment-card .quote.img-quote img")).to_be_visible()
+    wait_saved(page)
+    assert para.get_attribute("data-cids")
+
+    fb = feedback.build_feedback(storage.load_session(sid))
+    c = fb["comments"][0]
+    assert c["target"] == "image"
+    assert c["image"] == "zu1.png"
+    assert c["text"] == "この図は配色を直してほしい"
+    # コメントは本文を変えない。注釈では画像行全体が範囲になる
+    assert fb["result_text"] == "画像の説明文です。\n![構成図](zu1.png)"
+    assert fb["changes"] == []
+    assert "〖C1〗![構成図](zu1.png)〖/C1〗" in fb["annotated_text"]
+
+
+def test_commented_image_is_highlighted_and_linked_to_card(image_review):
+    """コメント付きの画像はハイライトされ、クリックでカードが開く。"""
+    page, _sid = image_review
+    para = page.locator("#editor .img-para")
+    para.click()
+    add_image_comment(page, "図の指摘")
+    expect(page.locator(".comment-card")).to_have_count(1)
+    # いったん本文をクリックして選択を外す
+    page.locator("#editor p:not(.img-para)").first.click()
+    para.click()
+    assert "cmt-active" in (para.get_attribute("class") or "")
+    assert "active" in (
+        page.locator(".comment-card").first.get_attribute("class") or "")
+
+
+def test_image_comment_survives_reload(image_review):
+    """画像コメントは編集HTMLに保存され、開き直しても残る。"""
+    page, _sid = image_review
+    page.locator("#editor .img-para").click()
+    add_image_comment(page, "残るはずのコメント")
+    expect(page.locator(".comment-card")).to_have_count(1)
+    wait_saved(page)
+    page.reload()
+    page.wait_for_selector("#editor .img-para")
+    expect(page.locator(".comment-card")).to_have_count(1)
+    assert page.locator("#editor .img-para").get_attribute("data-cids")
+
+
+def test_comment_is_dropped_when_inserted_image_is_removed(
+        image_review, tmp_path):
+    """人間が追加した画像を消すと、宛先を失うコメントも片付けられる。"""
+    page, sid = image_review
+    shot = tmp_path / "add.png"
+    shot.write_bytes(PNG_1PX)
+    page.set_input_files("#image-input", str(shot))
+    ins = page.locator('#editor .img-para[data-ins="1"]')
+    expect(ins).to_have_count(1, timeout=5000)
+    ins.click()
+    add_image_comment(page, "この画像は仮のものです")
+    expect(page.locator(".comment-card")).to_have_count(1)
+    wait_saved(page)
+
+    ins.click()
+    page.keyboard.press("Backspace")
+    expect(ins).to_have_count(0)
+    expect(page.locator(".comment-card")).to_have_count(0, timeout=5000)
+    assert storage.load_session(sid)["comments"] == []
+
+
+def test_deleting_image_comment_clears_highlight(image_review):
+    """コメントを削除すると画像のハイライト（data-cids）も外れる。"""
+    page, sid = image_review
+    para = page.locator("#editor .img-para")
+    para.click()
+    add_image_comment(page, "あとで消すコメント")
+    expect(page.locator(".comment-card")).to_have_count(1)
+    wait_saved(page)
+    page.on("dialog", lambda d: d.accept())
+    page.locator('.comment-card button[data-del]').click()
+    expect(page.locator(".comment-card")).to_have_count(0)
+    wait_saved(page)
+    assert para.get_attribute("data-cids") is None
+    fb = feedback.build_feedback(storage.load_session(sid))
+    assert "〖C1〗" not in fb["annotated_text"]

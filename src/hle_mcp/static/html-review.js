@@ -13,6 +13,8 @@
   const $ = (sel) => document.querySelector(sel);
   const CONTEXT_LEN = 50;   // prefix/suffix として保存する文脈の長さ
   const QUOTE_LIMIT = 300;  // quote の最大長（mdエディタと同じ）
+  // テキストとして選択できないため、要素ごとコメント対象にできるもの
+  const OBJ_SELECTOR = 'img, svg, canvas, video';
 
   async function api(path, method, body) {
     const opts = { method: method || 'GET', headers: {} };
@@ -47,7 +49,9 @@
   let lastSel = null;  // 直近の非collapsed選択 { quote, prefix, suffix, range }
   let activeCid = null;
   let editing = null;  // 編集中の対象 { cid, rid|null }
-  let anchors = new Map(); // cid -> Range（現在のiframe DOM上の位置）
+  let anchors = new Map();    // cid -> Range（現在のiframe DOM上の位置）
+  let objAnchors = new Map(); // cid -> 画像・図の要素（画像コメント）
+  let selectedObj = null;     // クリックで選んだ画像・図
 
   const frame = () => $('#doc-frame');
   const frameDoc = () => frame().contentDocument;
@@ -97,7 +101,13 @@
     style.textContent =
       '::highlight(hle-comment){background:rgba(255,213,79,.5);}' +
       '::highlight(hle-active){background:rgba(255,152,0,.65);}' +
-      '::highlight(hle-draft){background:rgba(255,152,0,.5);}';
+      '::highlight(hle-draft){background:rgba(255,152,0,.5);}' +
+      // 画像・図は文字の選択で示せないので要素ごと枠線で囲む。
+      // 属性だけを使い、本文テキスト（アンカーの拠り所）には触れない
+      '[data-hle-obj]{outline:3px solid rgba(249,171,0,.85);' +
+      'outline-offset:2px;cursor:pointer;}' +
+      '[data-hle-obj="active"],[data-hle-obj="draft"]{outline-color:#f57c00;}' +
+      '[data-hle-obj="sel"]{outline-color:#1a73e8;}';
     (doc.head || doc.body).appendChild(style);
     doc.addEventListener('selectionchange', captureSelection);
     doc.addEventListener('click', onFrameClick);
@@ -182,13 +192,49 @@
     return best == null ? null : { start: best, end: best + q.length };
   }
 
+  /* 画像・図は quote による再検索ができないので、位置を「タグ名:出現順」で
+     覚える。DOM順は同じソースを読み直す限り安定する */
+  function elemRef(el) {
+    const tag = el.tagName.toLowerCase();
+    const all = frameDoc().getElementsByTagName(tag);
+    const i = Array.prototype.indexOf.call(all, el);
+    return i < 0 ? '' : tag + ':' + i;
+  }
+
+  function elemFromRef(ref) {
+    const m = /^([A-Za-z][A-Za-z0-9-]*):(\d+)$/.exec(String(ref || ''));
+    const doc = frameDoc();
+    if (!m || !doc) return null;
+    return doc.getElementsByTagName(m[1])[Number(m[2])] || null;
+  }
+
+  /* AIが対象を読み取れるよう、人間にも分かる名前を付ける */
+  function objectLabel(el) {
+    const tag = el.tagName.toLowerCase();
+    const alt = el.getAttribute('alt') || el.getAttribute('aria-label') ||
+      el.getAttribute('title') || '';
+    if (tag === 'img') {
+      const src = el.getAttribute('src') || '';
+      if (/^data:/i.test(src)) return alt || '画像（埋め込み）';
+      return alt || src.split(/[?#]/)[0].split('/').pop() || '画像';
+    }
+    if (tag === 'svg') return alt || '図（SVG）';
+    return alt || tag;
+  }
+
   /* 全コメントの位置を解決し直してハイライトを塗る */
   function applyHighlights() {
     anchors = new Map();
+    objAnchors = new Map();
     const doc = frameDoc();
     if (!doc || !doc.body) return;
     const idx = textIndex();
     session.comments.forEach((c) => {
+      if (c.target === 'image') {
+        const el = elemFromRef(c.image_ref);
+        if (el) objAnchors.set(c.id, el);
+        return;
+      }
       const pos = locate(idx, c);
       if (!pos) return;
       const r = rangeFromOffsets(idx, pos.start, pos.end);
@@ -197,7 +243,26 @@
     paintHighlights();
   }
 
+  /* 画像・図の枠線を塗り直す（属性の付け外しだけを行う） */
+  function paintObjects() {
+    const doc = frameDoc();
+    if (!doc || !doc.body) return;
+    doc.querySelectorAll('[data-hle-obj]').forEach((el) => {
+      el.removeAttribute('data-hle-obj');
+    });
+    objAnchors.forEach((el, cid) => {
+      el.setAttribute('data-hle-obj', cid === activeCid ? 'active' : 'on');
+    });
+    if (draft && draft.element && draft.element.isConnected) {
+      draft.element.setAttribute('data-hle-obj', 'draft');
+    }
+    if (selectedObj && selectedObj.isConnected) {
+      selectedObj.setAttribute('data-hle-obj', 'sel');
+    }
+  }
+
   function paintHighlights() {
+    paintObjects();
     const win = frameWin();
     if (!win || !win.CSS || !win.CSS.highlights || !win.Highlight) return;
     const normal = [];
@@ -239,14 +304,28 @@
         suffix: after.toString().slice(0, CONTEXT_LEN),
         range: r.cloneRange(),
       };
+      // 文字列を選び直したら画像の選択は解除する（対象を1つに保つ）
+      if (selectedObj) { selectedObj = null; paintHighlights(); }
     } catch (e) {
       // body外（head等）を含む選択は位置が特定できないため無視する
     }
   }
 
-  /* ハイライト済みの本文をクリックしたら対応するコメントを選択する */
+  /* ハイライト済みの本文をクリックしたら対応するコメントを選択する。
+     画像・図のクリックは「コメント対象の指定」として扱う */
   function onFrameClick(e) {
     const doc = frameDoc();
+    const obj = e.target.closest && e.target.closest(OBJ_SELECTOR);
+    if (obj) {
+      selectedObj = obj;
+      lastSel = null; // 画像を選んだら直前の文字列選択は捨てる
+      for (const [cid, el] of objAnchors) {
+        if (el === obj) { activateComment(cid, false); return; }
+      }
+      paintHighlights();
+      return;
+    }
+    if (selectedObj) { selectedObj = null; paintHighlights(); }
     if (!doc || !doc.caretRangeFromPoint) return;
     let caret = null;
     try {
@@ -264,19 +343,40 @@
   }
 
   /* ---------- コメント下書き ---------- */
+  function newCid() {
+    return 'c' + Date.now().toString(36) +
+      Math.random().toString(36).slice(2, 6);
+  }
+
   function startCommentDraft() {
+    if (selectedObj && selectedObj.isConnected) {
+      const ref = elemRef(selectedObj);
+      if (!ref) {
+        alert('この画像は位置を特定できませんでした');
+        return;
+      }
+      const label = objectLabel(selectedObj);
+      draft = {
+        cid: newCid(), target: 'image', quote: label, image: label,
+        image_ref: ref, element: selectedObj,
+      };
+      showDraft('🖼 ' + label);
+      return;
+    }
     captureSelection(); // 選択が残っていれば最新の内容に更新する
     if (!lastSel) {
       alert('表示されたページの、コメントを付けたい文字列を' +
-        'ドラッグで選択してください');
+        'ドラッグで選択するか、画像や図をクリックしてください');
       return;
     }
-    const cid = 'c' + Date.now().toString(36) +
-      Math.random().toString(36).slice(2, 6);
-    draft = Object.assign({ cid: cid }, lastSel);
+    draft = Object.assign({ cid: newCid(), target: 'text' }, lastSel);
+    showDraft(draft.quote);
+  }
+
+  function showDraft(label) {
     paintHighlights();
     $('#comment-draft').hidden = false;
-    $('#draft-quote').textContent = draft.quote;
+    $('#draft-quote').textContent = label;
     $('#draft-text').value = '';
     $('#draft-text').focus();
   }
@@ -284,14 +384,24 @@
   async function submitDraft() {
     const text = $('#draft-text').value.trim();
     if (!text) { $('#draft-text').focus(); return; }
+    const body = {
+      id: draft.cid, quote: draft.quote, text: text, author: 'human',
+      target: draft.target || 'text',
+    };
+    if (draft.target === 'image') {
+      body.image = draft.image;
+      body.image_ref = draft.image_ref;
+    } else {
+      body.prefix = draft.prefix;
+      body.suffix = draft.suffix;
+    }
     try {
-      const comment = await api('/api/sessions/' + sid + '/comments', 'POST', {
-        id: draft.cid, quote: draft.quote, prefix: draft.prefix,
-        suffix: draft.suffix, text: text, author: 'human',
-      });
+      const comment = await api(
+        '/api/sessions/' + sid + '/comments', 'POST', body);
       session.comments.push(comment);
       draft = null;
       lastSel = null;
+      selectedObj = null;
       $('#comment-draft').hidden = true;
       renderComments();
       applyHighlights();
@@ -302,6 +412,7 @@
 
   function cancelDraft() {
     draft = null;
+    selectedObj = null;
     $('#comment-draft').hidden = true;
     paintHighlights();
   }
@@ -352,8 +463,8 @@
     const list = $('#comment-list');
     if (!session.comments.length) {
       list.innerHTML = '<div class="empty-note">コメントはまだありません。<br>' +
-        '表示されたページの文字列を選択して「💬 コメント」を押すと追加できます。' +
-        '</div>';
+        '文字列を選択、または画像・図をクリックして<br>' +
+        '「💬 コメント」を押すと追加できます。</div>';
       return;
     }
     list.innerHTML = session.comments.map((c, i) => {
@@ -365,7 +476,9 @@
       return '<div class="comment-card' +
         (c.id === activeCid ? ' active' : '') +
         '" data-cid="' + esc(c.id) + '">' +
-        '<div class="quote">C' + (i + 1) + ': ' + esc(c.quote) + '</div>' +
+        '<div class="quote">C' + (i + 1) + ': ' +
+        esc(c.target === 'image' ? '🖼 ' + (c.image || c.quote) : c.quote) +
+        '</div>' +
         authorLabel(c.author) +
         '<span class="when">' + esc(fmtDate(c.created_at)) + '</span>' +
         editedMark(c) + bodyHtml(c.id, null, c) +
@@ -483,13 +596,14 @@
     document.querySelectorAll('.comment-card').forEach((card) =>
       card.classList.toggle('active', card.dataset.cid === cid));
     paintHighlights();
-    const target = scrollFrame ? anchors.get(cid) : null;
-    if (target) {
-      const el = target.startContainer.nodeType === Node.ELEMENT_NODE
-        ? target.startContainer : target.startContainer.parentElement;
-      if (el && el.scrollIntoView) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }
+    const range = scrollFrame ? anchors.get(cid) : null;
+    const el = scrollFrame
+      ? (objAnchors.get(cid) || (range && (
+          range.startContainer.nodeType === Node.ELEMENT_NODE
+            ? range.startContainer : range.startContainer.parentElement)))
+      : null;
+    if (el && el.scrollIntoView) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
     if (!scrollFrame) {
       const card = document.querySelector(

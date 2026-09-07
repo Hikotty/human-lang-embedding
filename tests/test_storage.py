@@ -318,3 +318,71 @@ def test_add_comment_accepts_browser_generated_id():
         s["id"], quote="q", text="t", comment_id="cmt77320wr5xa"
     )
     assert c["id"] == "cmt77320wr5xa"
+
+
+# ---------- 画像へのコメント ----------
+def test_add_image_comment_keeps_target_and_name():
+    """画像コメントは target と対象の名前を保存する。"""
+    s = storage.create_session("本文", "d", "")
+    c = storage.add_comment(
+        s["id"], quote="![図](a.png)", text="差し替えて",
+        target="image", image="a.png",
+    )
+    assert c["target"] == "image"
+    assert c["image"] == "a.png"
+    assert "image_ref" not in c
+
+
+def test_add_text_comment_omits_target_key():
+    """既定（テキスト）ではキーを増やさず従来の形を保つ。"""
+    s = storage.create_session("本文", "d", "")
+    c = storage.add_comment(s["id"], quote="本", text="ここ")
+    assert "target" not in c
+    assert "image" not in c
+
+
+def test_add_image_comment_normalizes_name_to_basename():
+    """URLに埋め込むため、パスを含む名前はベース名へ正規化する。"""
+    s = storage.create_session("本文", "d", "")
+    c = storage.add_comment(
+        s["id"], quote="q", text="t", target="image",
+        image="../../etc/passwd.png",
+    )
+    assert c["image"] == "passwd.png"
+
+
+def test_add_image_comment_accepts_html_anchor():
+    """HTMLレビューの画像アンカー（タグ名:出現順）を受け入れる。"""
+    s = storage.create_session("<p>本文</p>", "d", "", mode="html")
+    c = storage.add_comment(
+        s["id"], quote="図（SVG）", text="配色を直して",
+        target="image", image="図（SVG）", image_ref="svg:2",
+    )
+    assert c["image_ref"] == "svg:2"
+
+
+@pytest.mark.parametrize(
+    "bad_ref",
+    ["img", "img:", ":0", "img:x", "img:0 svg:1", "img[0]", "img:0;a",
+     "*:0", "img:1234567"],
+)
+def test_add_comment_rejects_invalid_image_ref(bad_ref):
+    """DOM検索に使うため、アンカーの書式を厳しく制限する。"""
+    s = storage.create_session("t", "d", "")
+    with pytest.raises(ValueError):
+        storage.add_comment(
+            s["id"], "q", "t", target="image", image_ref=bad_ref
+        )
+
+
+def test_add_comment_rejects_unknown_target():
+    s = storage.create_session("t", "d", "")
+    with pytest.raises(ValueError):
+        storage.add_comment(s["id"], "q", "t", target="video")
+
+
+def test_image_comment_requires_image_identity():
+    """対象を特定できない画像コメントは受け付けない。"""
+    s = storage.create_session("t", "d", "")
+    with pytest.raises(ValueError):
+        storage.add_comment(s["id"], "q", "t", target="image")

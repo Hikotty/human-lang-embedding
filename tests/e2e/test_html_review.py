@@ -6,10 +6,16 @@ sandbox付きiframeでの表示・範囲選択コメント・ハイライト・
 
 from __future__ import annotations
 
+import base64
+
 import pytest
 from playwright.sync_api import expect
 
 from hle_mcp import storage
+
+from ..conftest import PNG_1PX
+
+PNG_DATA_URL = "data:image/png;base64," + base64.b64encode(PNG_1PX).decode()
 
 HTML_DOC = """<!doctype html>
 <html><head>
@@ -20,7 +26,8 @@ HTML_DOC = """<!doctype html>
 <p id="lead">これは重要な説明文です。</p>
 <p id="sub">これは補足の説明文です。</p>
 <svg viewBox="0 0 100 20"><text x="5" y="12">SVG内テキスト</text></svg>
-</body></html>"""
+<img id="fig" alt="構成図" width="60" height="40" src="__PNG__">
+</body></html>""".replace("__PNG__", PNG_DATA_URL)
 
 
 @pytest.fixture()
@@ -180,3 +187,110 @@ def test_no_csp_violations(html_review):
     page.wait_for_timeout(300)
     violations = [m for m in messages if "Content Security Policy" in m]
     assert violations == []
+
+
+# ---------- 画像・図へのコメント ----------
+
+def frame_attr(page, selector: str, attr: str):
+    """iframe内の要素の属性値を読む。"""
+    return page.evaluate(
+        """([sel, a]) => {
+            const doc = document.getElementById('doc-frame').contentDocument;
+            const el = doc.querySelector(sel);
+            return el ? el.getAttribute(a) : null;
+        }""",
+        [selector, attr],
+    )
+
+
+def click_in_frame(page, selector: str) -> None:
+    """iframe内の要素をクリックする。"""
+    page.frame_locator("#doc-frame").locator(selector).click()
+
+
+def test_svg_figure_can_be_commented(html_review):
+    """テキストで選べない図（SVG）自体にコメントを付けられる。"""
+    page, sid, _messages = html_review
+    click_in_frame(page, "svg")
+    page.click("#btn-comment")
+    expect(page.locator("#draft-quote")).to_have_text("🖼 図（SVG）")
+    page.fill("#draft-text", "この図の配色を本文と揃えて")
+    page.click("#draft-submit")
+    expect(page.locator(".comment-card")).to_have_count(1)
+    expect(page.locator(".comment-card .quote")).to_contain_text("図（SVG）")
+
+    s = storage.load_session(sid)
+    c = s["comments"][0]
+    assert c["target"] == "image"
+    assert c["image_ref"] == "svg:0"
+    assert c["text"] == "この図の配色を本文と揃えて"
+    # 対象HTMLは書き換えられていない（属性はブラウザ上の表示だけ）
+    assert s["revisions"][0]["base_text"] == HTML_DOC
+
+
+def test_img_comment_uses_alt_as_label(html_review):
+    """imgはalt（なければファイル名）を対象の名前として使う。"""
+    page, sid, _messages = html_review
+    click_in_frame(page, "#fig")
+    page.click("#btn-comment")
+    expect(page.locator("#draft-quote")).to_have_text("🖼 構成図")
+    page.fill("#draft-text", "画像を新しいものに差し替えて")
+    page.click("#draft-submit")
+    expect(page.locator(".comment-card")).to_have_count(1)
+    c = storage.load_session(sid)["comments"][0]
+    assert c["image"] == "構成図"
+    assert c["image_ref"] == "img:0"
+
+
+def test_image_comment_outline_restored_after_reload(html_review):
+    """画像コメントのアンカーは開き直しても解決される。"""
+    page, _sid, _messages = html_review
+    click_in_frame(page, "#fig")
+    add_comment(page, "枠線が復元されるか")
+    expect(page.locator(".comment-card")).to_have_count(1)
+    page.reload()
+    page.wait_for_function(
+        """() => {
+            const f = document.getElementById('doc-frame');
+            return !!(f && f.contentDocument &&
+                      f.contentDocument.querySelector('#fig[data-hle-obj]'));
+        }"""
+    )
+    assert frame_attr(page, "#fig", "data-hle-obj") in ("on", "active")
+
+
+def test_clicking_commented_image_activates_card(html_review):
+    """コメント付き画像をクリックすると対応するカードが開く。"""
+    page, _sid, _messages = html_review
+    click_in_frame(page, "#fig")
+    add_comment(page, "画像への指摘")
+    expect(page.locator(".comment-card")).to_have_count(1)
+    select_in_frame(page, "#sub", 3, 5)  # 別の対象を選び直す
+    click_in_frame(page, "#fig")
+    assert "active" in (
+        page.locator(".comment-card").first.get_attribute("class") or "")
+    # クリック直後は「選択中」なので、mdの画像選択と同じく選択枠を優先する
+    assert frame_attr(page, "#fig", "data-hle-obj") == "sel"
+
+
+def test_deleting_image_comment_removes_outline(html_review):
+    """画像コメントを削除すると枠線も消える。"""
+    page, _sid, _messages = html_review
+    click_in_frame(page, "#fig")
+    add_comment(page, "あとで消す")
+    expect(page.locator(".comment-card")).to_have_count(1)
+    page.on("dialog", lambda d: d.accept())
+    page.locator(".comment-card button[data-del]").click()
+    expect(page.locator(".comment-card")).to_have_count(0)
+    assert frame_attr(page, "#fig", "data-hle-obj") is None
+
+
+def test_text_comment_still_works_after_image_selection(html_review):
+    """画像を選んだあとでも、文字列選択のコメントに切り替えられる。"""
+    page, sid, _messages = html_review
+    click_in_frame(page, "#fig")
+    select_in_frame(page, "#lead", 3, 8)  # 「重要な説明」
+    add_comment(page, "文字列への指摘")
+    c = storage.load_session(sid)["comments"][0]
+    assert c["quote"] == "重要な説明"
+    assert "target" not in c  # テキストコメントは従来の形のまま

@@ -169,7 +169,7 @@ def test_build_feedback_original_matches_base_invariant():
 
 # ---------- 画像段落 ----------
 
-def _img_para(name, md=None, del_=False, ins=False):
+def _img_para(name, md=None, del_=False, ins=False, cids=""):
     attrs = f'class="img-para" data-img="{name}"'
     if md:
         attrs += f' data-md="{md}"'
@@ -177,6 +177,8 @@ def _img_para(name, md=None, del_=False, ins=False):
         attrs += ' data-del="1"'
     if ins:
         attrs += ' data-ins="1"'
+    if cids:
+        attrs += f' data-cids="{cids}"'
     return f'<p {attrs} contenteditable="false"><img src="x">{name}</p>'
 
 
@@ -213,6 +215,61 @@ def test_image_alt_text_content_ignored():
     # 画像段落内のテキスト（キャプション等）は本文に混ざらない
     orig, _, _, _ = _texts(_img_para("a.png", "![](a.png)"))
     assert orig == "![](a.png)"
+
+
+# ---------- 画像へのコメント ----------
+
+def test_image_comment_marks_whole_line():
+    """画像に付いたコメントは画像行全体を範囲として示す。"""
+    html = "<p>前</p>" + _img_para("a.png", "![図](a.png)", cids="c1")
+    orig, result, annotated, changes = _texts(html, {"c1": 1})
+    assert orig == "前\n![図](a.png)"   # 本文は変わらない
+    assert result == "前\n![図](a.png)"
+    assert annotated == "前\n〖C1〗![図](a.png)〖/C1〗"
+    assert changes == []                # コメントは変更ではない
+
+
+def test_image_comment_on_deleted_image():
+    """削除指定された画像へのコメントも範囲として残る。"""
+    html = _img_para("a.png", "![図](a.png)", del_=True, cids="c1")
+    _, result, annotated, _ = _texts(html, {"c1": 3})
+    assert result == ""
+    assert annotated == "〖C3〗【画像削除:a.png】〖/C3〗"
+
+
+def test_image_multiple_comments_nest_in_order():
+    html = _img_para("a.png", "![図](a.png)", cids="c1 c2")
+    _, _, annotated, _ = _texts(html, {"c1": 1, "c2": 2})
+    assert annotated == "〖C1〗〖C2〗![図](a.png)〖/C2〗〖/C1〗"
+
+
+def test_image_comment_with_unknown_id_is_ignored():
+    """削除済みコメントのIDが残っていてもマーカーは出さない。"""
+    html = _img_para("a.png", "![図](a.png)", cids="gone")
+    _, _, annotated, _ = _texts(html, {})
+    assert annotated == "![図](a.png)"
+
+
+def test_comment_view_exposes_image_target():
+    """build_feedback のコメントに target / image が現れる。"""
+    s = storage.create_session("本文\n![図](a.png)", "画像コメント", "/tmp/x")
+    storage.add_comment(
+        s["id"], quote="![図](a.png)", text="この図を差し替えて",
+        target="image", image="a.png",
+    )
+    fb = feedback.build_feedback(storage.load_session(s["id"]))
+    c = fb["comments"][0]
+    assert c["target"] == "image"
+    assert c["image"] == "a.png"
+    assert "image_ref" not in c
+
+
+def test_comment_view_defaults_to_text_target():
+    s = storage.create_session("本文", "文字コメント", "/tmp/x")
+    storage.add_comment(s["id"], quote="本文", text="ここ")
+    c = feedback.build_feedback(storage.load_session(s["id"]))["comments"][0]
+    assert c["target"] == "text"
+    assert "image" not in c
 
 
 # ---------- マーカー記号のエスケープ ----------

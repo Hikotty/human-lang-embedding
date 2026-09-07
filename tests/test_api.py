@@ -126,6 +126,27 @@ def test_comment_and_reply_flow(web_port):
     assert loaded["comments"][0]["replies"][0]["text"] == "回答"
 
 
+def test_image_comment_endpoint(web_port):
+    """画像コメントの target / image がAPI経由で保存される。"""
+    s = storage.create_session("本文\n![図](a.png)", "d", "")
+    status, comment = _post(
+        web_port, f"/api/sessions/{s['id']}/comments",
+        {"id": "ci1", "quote": "![図](a.png)", "text": "この図を差し替えて",
+         "target": "image", "image": "a.png"})
+    assert status == 200
+    assert comment["target"] == "image" and comment["image"] == "a.png"
+    _, fb = _get(web_port, f"/api/sessions/{s['id']}/feedback")
+    assert fb["comments"][0]["image"] == "a.png"
+
+
+def test_image_comment_endpoint_rejects_bad_anchor(web_port):
+    s = storage.create_session("<p>本文</p>", "d", "", mode="html")
+    assert _status_of(lambda: _post(
+        web_port, f"/api/sessions/{s['id']}/comments",
+        {"id": "ci2", "quote": "図", "text": "x",
+         "target": "image", "image_ref": "img:0 svg:1"})) == 400
+
+
 def test_duplicate_comment_400_and_missing_comment_404(web_port):
     s = storage.create_session("t", "d", "")
     _post(web_port, f"/api/sessions/{s['id']}/comments",

@@ -37,6 +37,7 @@
   let dirty = false;
   let saveTimer = null;
   let draftCid = null;
+  let draftTarget = null; // 下書き中のコメント対象 { target, quote, image }
   let activeCid = null;
   let editing = null; // 編集中の対象 { cid, rid|null }
 
@@ -52,7 +53,8 @@
     document.title = session.title + ' - 校正レビュー';
     const rev = session.revisions[session.revisions.length - 1];
     Tracker.init($('#editor'), rev.base_text, rev.edited_html, onEdited,
-      { sessionId: sid, onImageFile: handleImageFile });
+      { sessionId: sid, onImageFile: handleImageFile,
+        onImageCommentsDropped: dropImageComments });
     renderMeta();
     renderComments();
     $('#btn-image').addEventListener('click', () => $('#image-input').click());
@@ -69,8 +71,13 @@
     $('#draft-submit').addEventListener('click', submitDraft);
     $('#draft-cancel').addEventListener('click', cancelDraft);
     $('#editor').addEventListener('click', (e) => {
-      const span = e.target.closest && e.target.closest('.cmt');
-      if (span) activateComment(span.dataset.cid, false);
+      if (!e.target.closest) return;
+      const span = e.target.closest('.cmt');
+      if (span) { activateComment(span.dataset.cid, false); return; }
+      // コメント付きの画像をクリックしたら対応するカードを開く
+      const p = e.target.closest('.img-para[data-cids]');
+      const cid = p ? (p.dataset.cids || '').split(/\s+/)[0] : '';
+      if (cid) activateComment(cid, false);
     });
     setInterval(pollRemote, 2500);
     window.addEventListener('beforeunload', () => {
@@ -147,20 +154,40 @@
   }
 
   /* ---------- コメント ---------- */
+  function newCid() {
+    return 'c' + Date.now().toString(36) +
+      Math.random().toString(36).slice(2, 6);
+  }
+
+  /* テキストの選択範囲、または選択中の画像にコメントを付ける。
+     画像はドラッグ選択できないので、クリックで選んだ画像を対象にする。 */
   function startCommentDraft() {
     const r = Tracker.getRange();
-    if (!r || r.collapsed) {
-      alert('コメントを付けたい範囲をドラッグで選択してください');
+    const hasRange = !!r && !r.collapsed;
+    const img = hasRange ? null : Tracker.getSelectedImage();
+    if (!hasRange && !img) {
+      alert('コメントを付けたい範囲をドラッグで選択するか、\n' +
+        '画像をクリックして選択してください');
       return;
     }
     if (draftCid) cancelDraft();
-    const quote = r.toString().replace(/\u200B/g, '').slice(0, 300);
-    const cid = 'c' + Date.now().toString(36) +
-      Math.random().toString(36).slice(2, 6);
-    if (!Tracker.wrapRangeComment(r.cloneRange(), cid)) return;
+    const cid = newCid();
+    if (img) {
+      if (!Tracker.addImageComment(cid)) return;
+      draftTarget = { target: 'image', quote: img.md, image: img.name };
+      showDraft(cid, '🖼 ' + img.name);
+    } else {
+      const quote = r.toString().replace(/\u200B/g, '').slice(0, 300);
+      if (!Tracker.wrapRangeComment(r.cloneRange(), cid)) return;
+      draftTarget = { target: 'text', quote: quote, image: '' };
+      showDraft(cid, quote);
+    }
+  }
+
+  function showDraft(cid, label) {
     draftCid = cid;
     $('#comment-draft').hidden = false;
-    $('#draft-quote').textContent = quote;
+    $('#draft-quote').textContent = label;
     $('#draft-text').value = '';
     $('#draft-text').focus();
   }
@@ -168,12 +195,14 @@
   async function submitDraft() {
     const text = $('#draft-text').value.trim();
     if (!text) { $('#draft-text').focus(); return; }
-    const quote = $('#draft-quote').textContent;
+    const t = draftTarget || { target: 'text', quote: '', image: '' };
     try {
       const comment = await api('/api/sessions/' + sid + '/comments', 'POST',
-        { id: draftCid, quote: quote, text: text, author: 'human' });
+        { id: draftCid, quote: t.quote, text: text, author: 'human',
+          target: t.target, image: t.image });
       session.comments.push(comment);
       draftCid = null;
+      draftTarget = null;
       $('#comment-draft').hidden = true;
       dirty = true;
       await saveDoc();
@@ -186,8 +215,23 @@
   function cancelDraft() {
     if (draftCid) Tracker.unwrapComment(draftCid);
     draftCid = null;
+    draftTarget = null;
     $('#comment-draft').hidden = true;
     onEdited();
+  }
+
+  /* 参照先の画像が消えて宛先を失ったコメントを片付ける */
+  async function dropImageComments(cids) {
+    for (const cid of cids) {
+      try {
+        await api('/api/sessions/' + sid + '/comments/' + cid + '/delete',
+          'POST', {});
+      } catch (e) { /* 既に無い場合は無視する */ }
+      session.comments = session.comments.filter((x) => x.id !== cid);
+      if (activeCid === cid) activeCid = null;
+      if (editing && editing.cid === cid) editing = null;
+    }
+    renderComments();
   }
 
   function authorLabel(a) {
@@ -225,6 +269,17 @@
       '<button data-edit-cancel="1">キャンセル</button></div>';
   }
 
+  /* コメントの対象表示。画像コメントはサムネイルで何を指しているか示す */
+  function quoteHtml(c, n) {
+    if (c.target === 'image' && c.image) {
+      const url = '/api/sessions/' + encodeURIComponent(sid) +
+        '/files/' + encodeURIComponent(c.image);
+      return '<div class="quote img-quote"><img src="' + esc(url) +
+        '" alt=""><span>C' + n + ': ' + esc(c.image) + '</span></div>';
+    }
+    return '<div class="quote">C' + n + ': ' + esc(c.quote) + '</div>';
+  }
+
   function bodyHtml(cid, rid, o) {
     if (isEditing(cid, rid)) return editFormHtml(cid, rid, o.text);
     const key = targetKey(cid, rid);
@@ -250,7 +305,7 @@
       return '<div class="comment-card' +
         (c.id === activeCid ? ' active' : '') +
         '" data-cid="' + esc(c.id) + '">' +
-        '<div class="quote">C' + (i + 1) + ': ' + esc(c.quote) + '</div>' +
+        quoteHtml(c, i + 1) +
         authorLabel(c.author) +
         '<span class="when">' + esc(fmtDate(c.created_at)) + '</span>' +
         editedMark(c) + bodyHtml(c.id, null, c) +
@@ -370,10 +425,14 @@
     activeCid = cid;
     document.querySelectorAll('#editor .cmt').forEach((s) =>
       s.classList.toggle('active', s.dataset.cid === cid));
+    document.querySelectorAll('#editor .img-para').forEach((p) =>
+      p.classList.toggle('cmt-active',
+        (p.dataset.cids || '').split(/\s+/).indexOf(cid) >= 0));
     document.querySelectorAll('.comment-card').forEach((card) =>
       card.classList.toggle('active', card.dataset.cid === cid));
     const target = scrollEditor
-      ? document.querySelector('#editor .cmt[data-cid="' + cid + '"]')
+      ? (document.querySelector('#editor .cmt[data-cid="' + cid + '"]') ||
+         document.querySelector('#editor .img-para[data-cids~="' + cid + '"]'))
       : document.querySelector('.comment-card[data-cid="' + cid + '"]');
     if (target) target.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
