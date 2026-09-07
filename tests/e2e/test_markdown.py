@@ -204,3 +204,199 @@ def test_image_line_still_renders_as_image(browser, web_port, png_file):
         assert fb["result_text"] == text
     finally:
         context.close()
+
+
+# ---------- 表 ----------
+
+TABLE_TEXT = "\n".join(
+    [
+        "説明文です。",
+        "",
+        "| 名前 | 説明 | 数 |",
+        "|:---|:---:|---:|",
+        "| **a** | `x` | 1 |",
+        "| b | [link](https://e.test/1) | 2 |",
+        "",
+        "外側のパイプを省いた表:",
+        "",
+        "A | B",
+        "--- | ---",
+        "エス\\|ケープ | 2",
+        "",
+        "| 区切り行がないので表ではない |",
+    ]
+)
+
+
+@pytest.fixture()
+def table_page(browser, web_port):
+    context, page, sid = open_editor(browser, web_port, TABLE_TEXT, "表E2E")
+    yield page, sid
+    context.close()
+
+
+def test_table_is_rendered_as_cells(table_page):
+    """表はヘッダ・区切り・本体に分かれ、セルごとに描画される。"""
+    page, _ = table_page
+    expect(page.locator("#editor p.md-tr")).to_have_count(7)
+    expect(page.locator("#editor p.md-tr-head")).to_have_count(2)
+    expect(page.locator("#editor p.md-tr-sep")).to_have_count(2)
+    expect(page.locator("#editor p.md-tr-first")).to_have_count(2)
+    head = page.locator("#editor p.md-tr-head").first
+    expect(head.locator(".md-td")).to_have_count(3)
+    expect(head.locator(".md-td").nth(0)).to_have_text("名前")
+    expect(head.locator(".md-td").nth(2)).to_have_text("数")
+    # 区切りの | は記号としてテキストに残る（原文復元のため）
+    expect(head.locator(".md-mk")).to_have_count(4)
+
+
+def test_table_alignment_classes(table_page):
+    """区切り行の :--- / :---: / ---: が各列の寄せになる。"""
+    page, _ = table_page
+    row = page.locator("#editor p.md-tr").nth(2)
+    expect(row.locator(".md-td.md-al-l")).to_have_count(1)
+    expect(row.locator(".md-td.md-al-c")).to_have_count(1)
+    expect(row.locator(".md-td.md-al-r")).to_have_count(1)
+
+
+def test_table_cell_inline_syntax_is_decorated(table_page):
+    """セルの中でも太字・コード・リンクが装飾される。"""
+    page, _ = table_page
+    body = page.locator("#editor p.md-tr").nth(2)
+    expect(body.locator(".md-b")).to_have_text("**a**")
+    expect(body.locator(".md-code-in")).to_have_text("`x`")
+    expect(page.locator("#editor p.md-tr").nth(3).locator(".md-link")) \
+        .to_have_text("[link](https://e.test/1)")
+
+
+def test_table_without_outer_pipes(table_page):
+    """GFMの外側パイプ省略形も表として扱う。"""
+    page, _ = table_page
+    head = page.locator("#editor p.md-tr-head").nth(1)
+    expect(head.locator(".md-td")).to_have_count(2)
+    expect(head.locator(".md-td").first).to_have_text("A")
+    expect(head.locator(".md-mk")).to_have_count(1)
+
+
+def test_pipe_line_without_separator_is_not_a_table(table_page):
+    """区切り行のない | 行は表にしない（普通の文を誤検出しない）。"""
+    page, _ = table_page
+    last = page.locator("#editor p").last
+    assert "md-tr" not in (last.get_attribute("class") or "")
+    expect(last).to_have_text("| 区切り行がないので表ではない |")
+
+
+def test_table_roundtrip_is_lossless(table_page):
+    """セルに分けても原文が完全に復元できる（エスケープ \\| も含む）。"""
+    page, sid = table_page
+    save_current_html(page, sid)
+    fb = feedback.build_feedback(storage.load_session(sid))
+    assert fb["original_text"] == TABLE_TEXT
+    assert fb["result_text"] == TABLE_TEXT
+
+
+def test_editing_table_cell_is_tracked(table_page):
+    """セルの中身を直しても追跡され、原文は保持される。"""
+    page, sid = table_page
+    page.evaluate(
+        """() => {
+            const rows = document.querySelectorAll('#editor p.md-tr');
+            const td = rows[2].querySelectorAll('.md-td')[2];
+            const node = td.firstChild;  // 「 1 」
+            const r = document.createRange();
+            r.setStart(node, 2);
+            r.collapse(true);
+            const sel = getSelection();
+            sel.removeAllRanges();
+            sel.addRange(r);
+            document.getElementById('editor').focus();
+        }"""
+    )
+    page.keyboard.type("0")
+    expect(page.locator("#editor p.md-tr ins")).to_have_text("0")
+    expect(page.locator("#save-state")).to_have_text("保存済み", timeout=5000)
+    fb = feedback.build_feedback(storage.load_session(sid))
+    assert fb["original_text"] == TABLE_TEXT
+    assert "| **a** | `x` | 10 |" in fb["result_text"]
+
+
+# ---------- タスクリスト・脚注・文中画像・自動リンク ----------
+
+MISC_TEXT = "\n".join(
+    [
+        "- [ ] 未完了のタスク",
+        "- [x] 完了したタスク",
+        "文中に![図](zu.png)を置きます。",
+        'タイトル付き[リンク](https://e.test/2 "説明")です。',
+        "自動リンクは<https://e.test/3>です。",
+        "脚注参照[^1]があります。",
+        "",
+        "[^1]: 脚注の説明文",
+    ]
+)
+
+
+@pytest.fixture()
+def misc_page(browser, web_port):
+    context, page, sid = open_editor(browser, web_port, MISC_TEXT, "記法E2E")
+    yield page, sid
+    context.close()
+
+
+def test_task_list_gets_checkbox_classes(misc_page):
+    page, _ = misc_page
+    expect(page.locator("#editor p.md-task")).to_have_count(2)
+    expect(page.locator("#editor p.md-task-done")).to_have_count(1)
+    # 記号は prefix としてテキストに残る
+    expect(page.locator("#editor p.md-task-done .md-mk")).to_have_text("- [x]")
+
+
+def test_inline_image_is_decorated(misc_page):
+    """行全体でない ![alt](url) も画像として装飾する（! が取り残されない）。"""
+    page, _ = misc_page
+    expect(page.locator("#editor .md-img")).to_have_text("![図](zu.png)")
+    expect(page.locator("#editor p.img-para")).to_have_count(0)
+
+
+def test_link_with_title_and_autolink(misc_page):
+    page, _ = misc_page
+    links = page.locator("#editor .md-link")
+    expect(links).to_have_count(2)
+    expect(links.nth(0)).to_have_text('[リンク](https://e.test/2 "説明")')
+    expect(links.nth(1)).to_have_text("<https://e.test/3>")
+
+
+def test_footnote_reference_and_definition(misc_page):
+    page, _ = misc_page
+    expect(page.locator("#editor .md-fn")).to_have_text("[^1]")
+    footnote = page.locator("#editor p.md-footnote")
+    expect(footnote).to_have_count(1)
+    expect(footnote.locator(".md-mk")).to_have_text("[^1]:")
+    expect(footnote).to_have_text("[^1]: 脚注の説明文")
+
+
+def test_misc_syntax_roundtrip_is_lossless(misc_page):
+    page, sid = misc_page
+    save_current_html(page, sid)
+    fb = feedback.build_feedback(storage.load_session(sid))
+    assert fb["original_text"] == MISC_TEXT
+    assert fb["result_text"] == MISC_TEXT
+
+
+def test_table_cells_are_laid_out_side_by_side(table_page):
+    """セルが横に並び、列幅が揃う（罫線付きの表として読める）。"""
+    page, _ = table_page
+    rows = page.locator("#editor p.md-tr")
+    body = rows.nth(2).locator(".md-td").evaluate_all(
+        "els => els.map(e => e.getBoundingClientRect().toJSON())")
+    assert len(body) == 3
+    assert body[0]["y"] == body[1]["y"] == body[2]["y"]  # 同じ行に並ぶ
+    assert body[0]["x"] < body[1]["x"] < body[2]["x"]
+    assert abs(body[0]["width"] - body[1]["width"]) < 2  # 等幅
+    # ヘッダ行と本体行で列の位置が揃う
+    head = rows.nth(0).locator(".md-td").evaluate_all(
+        "els => els.map(e => e.getBoundingClientRect().toJSON())")
+    assert abs(head[1]["x"] - body[1]["x"]) < 2
+    # 区切り行は罫線として低く表示される
+    sep = rows.nth(1).evaluate("el => el.getBoundingClientRect().height")
+    assert sep < rows.nth(0).evaluate("el => el.getBoundingClientRect().height")

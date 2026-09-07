@@ -99,17 +99,58 @@ html, body {
 }
 
 /* コードブロックは段落ごとに<p>のままなので、上下marginを消して連続させる */
-#editor .md-code, #editor .md-fence, #editor .md-tr {
+#editor .md-code, #editor .md-fence {
   font-family: "SFMono-Regular", Menlo, Consolas, "Courier New", monospace;
   font-size: .85em; line-height: 1.75; white-space: pre-wrap;
   background: #f6f8fa; margin: 0; padding: 0 .7em;
 }
 /* フェンス行に上下の余白を持たせ、ブロック全体が箱に見えるようにする */
 #editor .md-fence { color: #9aa0a6; padding: .3em .7em; }
-#editor .md-tr { background: #f8f9fa; }
 #editor .md-hr {
   border-bottom: 2px solid #e8eaed; line-height: 1.2; margin: .6em 0;
 }
+
+/* ---------- 表 ----------
+   1行=1段落の制約（原文復元の要）を守るため <table> は作らず、セルを
+   span にして横に並べる。区切りの | は .md-mk のテキストとして残るので、
+   細い縦罫線として見せる。 */
+#editor .md-tr {
+  display: flex; align-items: stretch; margin: 0; background: #fff;
+  border-left: 1px solid #dadce0;
+}
+#editor .md-tr-first { border-top: 1px solid #dadce0; }
+/* 縦罫線はセルの枠線で引く。| はその隣に淡く置いて、記号として残す */
+#editor .md-td {
+  flex: 1 1 0; min-width: 0; padding: .32em .55em;
+  border-right: 1px solid #dadce0; border-bottom: 1px solid #e8eaed;
+  overflow-wrap: anywhere;
+}
+#editor .md-tr > .md-mk {
+  flex: none; display: flex; align-items: center;
+  color: #eceff1; font-size: .7em; padding: 0;
+}
+/* ヘッダと本体の境目は太い罫線で示す（間に挟まる区切り行は罫線に見せる） */
+#editor .md-tr-head { background: #f8f9fa; }
+#editor .md-tr-head .md-td {
+  font-weight: 700; border-bottom: 2px solid #bdc1c6;
+}
+/* 区切り行は罫線の役目。--- は校正できるよう残しつつ低く薄く見せる */
+#editor .md-tr-sep { line-height: .7; }
+#editor .md-tr-sep .md-td {
+  padding: 0 .55em; font-size: .5em; color: #e8eaed; border-bottom: none;
+}
+#editor .md-al-l { text-align: left; }
+#editor .md-al-c { text-align: center; }
+#editor .md-al-r { text-align: right; }
+
+/* ---------- タスクリスト・脚注・文中画像 ---------- */
+/* チェックボックスは記号（[x]）をテキストとして残したまま色で示す */
+#editor .md-task > .md-mk { color: #5f6368; font-size: .9em; }
+#editor .md-task-done > .md-mk { color: #1e8e3e; font-weight: 700; }
+#editor .md-task-done { color: #5f6368; }
+#editor .md-footnote { font-size: .92em; color: #5f6368; padding-left: 1.2em; }
+#editor .md-fn { color: #1a73e8; font-size: .9em; }
+#editor .md-img { color: #188038; }
 
 #editor .md-b { font-weight: 700; }
 #editor .md-i { font-style: italic; }

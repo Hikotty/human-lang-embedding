@@ -37,13 +37,20 @@
   const MD_UL = /^([ \t]*)([-*+][ \t]+)(.*)$/;
   const MD_OL = /^([ \t]*)(\d{1,9}[.)][ \t]+)(.*)$/;
   const MD_HR = /^\s*([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
-  const MD_TABLE = /^\s*\|.*\|\s*$/;
+  // 表はセル区切りの | を含む行。1行だけでは表と決まらない（次の行が
+  // 区切り行かで決まる）ので、判定は scanTables で行単位に前もって行う
+  const MD_TABLE = /\|/;
+  const MD_TASK = /^(\[[ xX]\])([ \t]+)([\s\S]*)$/;
+  const MD_FOOTNOTE = /^(\s*\[\^[^\]\n]+\]:[ \t]*)([\s\S]*)$/;
   // インライン記法。コードを最優先に置き、コード内の記号を解釈しないようにする
   const MD_INLINE_SRC =
     '(`+)([^`\\n]+?)\\1' +            // `code`
     '|(\\*\\*|__|~~)([^\\n]+?)\\3' +  // **bold** __bold__ ~~strike~~
     '|([*_])([^*_\\n]+?)\\5' +        // *italic* _italic_
-    '|\\[([^\\]\\n]*)\\]\\(([^)\\s]*)\\)';  // [text](url)
+    // [text](url "title") と ![alt](url "title")
+    '|(!?)\\[([^\\]\\n]*)\\]\\(([^)\\s]*)((?:[ \\t]+"[^"\\n]*")?)\\)' +
+    '|\\[\\^([^\\]\\n]+)\\]' +        // [^1] 脚注参照
+    '|<((?:https?|mailto):[^>\\s]+)>';  // <https://example.com> autolink
 
   // ---------- ユーティリティ ----------
   function closestEl(node, sel) {
@@ -700,6 +707,7 @@
     while ((m = re.exec(text))) {
       let cls, open, close, body;
       let nested = true;
+      let emptyOk = false;
       if (m[1]) {
         cls = 'md-code-in'; open = m[1]; close = m[1]; body = m[2]; nested = false;
       } else if (m[3]) {
@@ -707,11 +715,19 @@
         open = m[3]; close = m[3]; body = m[4];
       } else if (m[5]) {
         cls = 'md-i'; open = m[5]; close = m[5]; body = m[6];
+      } else if (m[8] !== undefined) {
+        // ![alt](url) は文中の画像。行全体が画像の行は画像段落になる
+        cls = m[7] ? 'md-img' : 'md-link';
+        open = m[7] + '['; close = '](' + m[9] + m[10] + ')'; body = m[8];
+        emptyOk = true;  // ![](x.png) のように内側が空でも記法として扱う
+        nested = !m[7];
+      } else if (m[11]) {
+        cls = 'md-fn'; open = '[^'; close = ']'; body = m[11]; nested = false;
       } else {
-        cls = 'md-link'; open = '['; close = '](' + m[8] + ')'; body = m[7];
+        cls = 'md-link'; open = '<'; close = '>'; body = m[12]; nested = false;
       }
       // 内側が空・前後が空白のものは記法として扱わない（素のテキストとして残す）
-      if (!body || /^\s|\s$/.test(body)) continue;
+      if ((!body && !emptyOk) || (body && /^\s|\s$/.test(body))) continue;
       if (m.index > last) {
         parent.appendChild(document.createTextNode(text.slice(last, m.index)));
       }
@@ -729,19 +745,114 @@
     }
   }
 
+  /* 表の1行をセル区切りの | で分割する。前後の空白と \| は素のテキストとして
+     残し、返ったトークンを順に連結すると元の行に戻る（原文復元のため）。 */
+  function splitRow(raw) {
+    const m = /^([ \t]*)([\s\S]*?)([ \t]*)$/.exec(String(raw));
+    const parts = [];
+    const cells = [];
+    if (m[1]) parts.push({ type: 'pre', text: m[1] });
+    let buf = '';
+    const core = m[2];
+    for (let i = 0; i < core.length; i++) {
+      if (core[i] === '\\' && core[i + 1] === '|') { buf += '\\|'; i++; continue; }
+      if (core[i] === '|') {
+        if (buf) { parts.push({ type: 'td', text: buf }); cells.push(buf); buf = ''; }
+        parts.push({ type: 'mk', text: '|' });
+        continue;
+      }
+      buf += core[i];
+    }
+    if (buf) { parts.push({ type: 'td', text: buf }); cells.push(buf); }
+    if (m[3]) parts.push({ type: 'pre', text: m[3] });
+    return { parts: parts, cells: cells };
+  }
+
+  /* 区切り行（|---|:--:|）なら各列の寄せを返す。表でなければ null。 */
+  function tableAlign(raw) {
+    if (!MD_TABLE.test(raw) || !/-/.test(raw)) return null;
+    const cells = splitRow(raw).cells;
+    if (!cells.length) return null;
+    const align = [];
+    for (const cell of cells) {
+      const t = cell.trim();
+      if (!/^:?-+:?$/.test(t)) return null;
+      const left = t.startsWith(':');
+      const right = t.endsWith(':');
+      align.push(left && right ? 'c' : right ? 'r' : left ? 'l' : '');
+    }
+    return align;
+  }
+
+  /* 表ブロックを行番号ごとに割り出す。表は「| を含む行 + 区切り行」で確定し、
+     以降 | を含む行が続く限り本体とみなす（GFMと同じ判定）。 */
+  function scanTables(lines) {
+    const info = {};
+    let fence = false;
+    for (let i = 0; i < lines.length; i++) {
+      if (MD_FENCE.test(lines[i])) { fence = !fence; continue; }
+      if (fence || i === 0) continue;
+      const align = tableAlign(lines[i]);
+      if (!align || info[i] || !MD_TABLE.test(lines[i - 1]) || info[i - 1]) {
+        continue;
+      }
+      info[i - 1] = { role: 'head', align: align, first: true };
+      info[i] = { role: 'sep', align: align };
+      for (let j = i + 1; j < lines.length; j++) {
+        if (MD_FENCE.test(lines[j]) || !MD_TABLE.test(lines[j])) break;
+        info[j] = { role: 'body', align: align };
+      }
+    }
+    return info;
+  }
+
+  /* 表の行を組み立てる。セルは span なので逆変換（p/del/ins/span しか見ない）
+     を壊さず、| は .md-mk のテキストとして残る。 */
+  function appendRow(p, row, align, role) {
+    let col = 0;
+    row.parts.forEach((part) => {
+      if (part.type === 'mk') { p.appendChild(mdMark('|')); return; }
+      if (part.type === 'pre') {
+        p.appendChild(document.createTextNode(part.text));
+        return;
+      }
+      const td = document.createElement('span');
+      const a = align && align[col];
+      td.className = 'md-td' + (a ? ' md-al-' + a : '');
+      // 区切り行の --- は装飾の対象にならない
+      if (role === 'sep') td.appendChild(document.createTextNode(part.text));
+      else appendInline(td, part.text);
+      p.appendChild(td);
+      col++;
+    });
+  }
+
   /* 1行をブロック記法として解析する。state.fence でコードブロック内を追跡する。
      prefix は記号部分（.md-mk にする）、body は装飾対象の本文。
-     plain=true の行はインライン記法を解釈しない。 */
-  function mdBlock(line, state) {
+     plain=true の行はインライン記法を解釈しない。
+     tinfo は scanTables が求めた表の役割（あれば表の行として組み立てる）。 */
+  function mdBlock(line, state, tinfo) {
     const raw = String(line);
     if (MD_FENCE.test(raw)) {
       state.fence = !state.fence;
       return { cls: 'md-fence', prefix: raw, body: '' };
     }
     if (state.fence) return { cls: 'md-code', prefix: '', body: raw, plain: true };
+    if (tinfo) {
+      const role = tinfo.role;
+      return {
+        cls: 'md-tr' +
+          (role === 'head' ? ' md-tr-head' : role === 'sep' ? ' md-tr-sep' : '') +
+          (tinfo.first ? ' md-tr-first' : ''),
+        row: splitRow(raw),
+        align: tinfo.align,
+        role: role,
+      };
+    }
     if (MD_HR.test(raw)) return { cls: 'md-hr', prefix: raw, body: '' };
-    if (MD_TABLE.test(raw)) return { cls: 'md-tr', prefix: '', body: raw, plain: true };
-    let m = raw.match(MD_HEADING);
+    let m = raw.match(MD_FOOTNOTE);
+    if (m) return { cls: 'md-footnote', prefix: m[1], body: m[2] };
+    m = raw.match(MD_HEADING);
     if (m) {
       const level = m[1].replace(/[^#]/g, '').length;
       return { cls: 'md-h' + level, prefix: m[1], body: m[2] };
@@ -750,6 +861,17 @@
     if (m) return { cls: 'md-quote', prefix: m[1], body: m[2] };
     m = raw.match(MD_UL);
     if (m) {
+      const task = m[3].match(MD_TASK);
+      if (task) {
+        // - [x] のチェックボックス。記号は prefix としてテキストに残す
+        const done = task[1][1] !== ' ';
+        return {
+          cls: 'md-li md-task' + (done ? ' md-task-done' : '') +
+            mdIndentClass(m[1]),
+          prefix: m[1] + m[2] + task[1] + task[2],
+          body: task[3],
+        };
+      }
       return { cls: 'md-li' + mdIndentClass(m[1]), prefix: m[1] + m[2], body: m[3] };
     }
     m = raw.match(MD_OL);
@@ -767,18 +889,21 @@
   function renderBase(text) {
     editor.textContent = '';
     const lines = String(text).replace(/\r\n?/g, '\n').split('\n');
+    const tables = scanTables(lines);
     const state = { fence: false };
-    lines.forEach((line) => {
+    lines.forEach((line, i) => {
       const m = line.match(IMG_LINE);
       if (m && !state.fence) {
         editor.appendChild(makeImageParagraph(m[2], line, {}));
         return;
       }
-      const info = mdBlock(line, state);
+      const info = mdBlock(line, state, tables[i]);
       const p = document.createElement('p');
       if (info.cls) p.className = info.cls;
       if (info.prefix) p.appendChild(mdMark(info.prefix));
-      if (info.plain) {
+      if (info.row) {
+        appendRow(p, info.row, info.align, info.role);
+      } else if (info.plain) {
         if (info.body) p.appendChild(document.createTextNode(info.body));
       } else {
         appendInline(p, info.body);
