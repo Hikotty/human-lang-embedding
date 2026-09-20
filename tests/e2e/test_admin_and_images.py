@@ -63,6 +63,29 @@ def test_image_tracked_delete_and_undo_toggle(image_review):
     assert fb["changes"] == []
 
 
+def test_typing_after_image_click_goes_to_adjacent_paragraph(image_review):
+    """画像をクリックした直後の入力は、文書先頭ではなく隣の段落に入る。
+
+    contenteditable=false の画像段落をクリックするとキャレットが #editor
+    直下（段落外）に置かれる。その状態の入力を最寄りの段落に寄せる。
+    """
+    page, sid = image_review
+    para = page.locator("#editor .img-para")
+    para.click()
+    expect(para).to_have_class("img-para sel")
+    page.keyboard.type("補足")
+    ins = page.locator("#editor ins")
+    expect(ins).to_have_count(1)
+    expect(ins).to_have_text("補足")
+    # 画像の隣にある唯一のテキスト段落の末尾に入る
+    expect(page.locator("#editor p").nth(0)).to_have_text("画像の説明文です。補足")
+    # 文字入力に移ったので画像の選択は外れる
+    expect(para).to_have_class("img-para")
+    wait_saved(page)
+    fb = feedback.build_feedback(storage.load_session(sid))
+    assert fb["result_text"] == "画像の説明文です。補足\n![構成図](zu1.png)"
+
+
 def test_human_inserts_image_via_button(image_review, tmp_path):
     page, sid = image_review
     # カーソルを本文段落に置いてからファイル選択で画像を追加する

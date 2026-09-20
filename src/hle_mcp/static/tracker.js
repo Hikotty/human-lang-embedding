@@ -66,6 +66,11 @@
     return e && !e.classList.contains('pb') ? e : null;
   }
   function paraOf(node) { return closestEl(node, 'p'); }
+  /* 文字を入れられる段落（画像段落を除く）を返す */
+  function textParaOf(node) {
+    const p = paraOf(node);
+    return p && !p.classList.contains('img-para') ? p : null;
+  }
 
   function getRange() {
     const sel = window.getSelection();
@@ -90,6 +95,128 @@
     setCaret(node.parentNode, Array.prototype.indexOf.call(node.parentNode.childNodes, node) + 1);
   }
 
+  // ---------- 段落外キャレットの解決 ----------
+  // キャレットが #editor 直下（どの段落にも属さない位置）に置かれることがある。
+  // 代表例は innerHTML を差し替えた直後（undo/redo）で、Selection が指して
+  // いたノードが消えると境界点は #editor の先頭に潰れる。全選択の範囲も
+  // #editor 直下から始まる。この状態で文字を入れると段落外に <ins> が生えたり
+  // 文書先頭に飛んだりするので、入力の手前で最寄りのテキスト段落へ寄せる。
+
+  /* node/offset の位置を #editor 直下の childNodes インデックスに丸める */
+  function topLevelIndex(node, offset) {
+    if (node === editor) return offset;
+    let top = node;
+    while (top.parentNode !== editor) top = top.parentNode;
+    return Array.prototype.indexOf.call(editor.childNodes, top) + 1;
+  }
+
+  /* #editor 直下の index に最も近いテキスト段落を返す。
+     直後の段落（先頭）→ 直前の段落（末尾）→ 後方走査 → 前方走査 の順。 */
+  function nearestTextPara(index) {
+    const kids = editor.childNodes;
+    const ok = (n) => !!n && n.nodeType === 1 && n.tagName === 'P' &&
+      !n.classList.contains('img-para');
+    if (ok(kids[index])) return { p: kids[index], atEnd: false };
+    if (ok(kids[index - 1])) return { p: kids[index - 1], atEnd: true };
+    for (let i = index + 1; i < kids.length; i++) {
+      if (ok(kids[i])) return { p: kids[i], atEnd: false };
+    }
+    for (let i = index - 2; i >= 0; i--) {
+      if (ok(kids[i])) return { p: kids[i], atEnd: true };
+    }
+    return null;
+  }
+
+  /* 段落の先頭/末尾のテキスト位置にキャレットを置く（改行マーカーは避ける） */
+  function caretAtParaEdge(p, atEnd) {
+    const walker = document.createTreeWalker(p, NodeFilter.SHOW_TEXT);
+    let n;
+    let target = null;
+    while ((n = walker.nextNode())) {
+      if (closestEl(n, '.pb')) continue;
+      target = n;
+      if (!atEnd) break;
+    }
+    if (target) setCaret(target, atEnd ? target.length : 0);
+    else setCaret(p, 0);
+  }
+
+  /* キャレットが段落外なら最寄りのテキスト段落へ移す。移した/移さなかった
+     いずれでも現在の Range を返す。範囲選択（非 collapsed）は触らない。 */
+  function normalizeCaret() {
+    const r = getRange();
+    if (!r || !r.collapsed) return r;
+    if (textParaOf(r.startContainer)) return r;
+    const index = topLevelIndex(r.startContainer, r.startOffset);
+    let hit = nearestTextPara(index);
+    if (!hit) {
+      // 画像段落しかない文書。文字を入れる場所を作る
+      const p = document.createElement('p');
+      p.appendChild(document.createElement('br'));
+      editor.insertBefore(p, editor.childNodes[index] || null);
+      hit = { p: p, atEnd: false };
+    }
+    caretAtParaEdge(hit.p, hit.atEnd);
+    return getRange();
+  }
+
+  /* キャレット位置を「段落番号＋段落内の文字オフセット」で表す。
+     undo/redo は innerHTML を丸ごと差し替えるため、ノード参照ではなく
+     この形で持ち、差し替え後に同じ位置へ戻す。 */
+  function serializeCaret() {
+    const r = getRange();
+    if (!r) return null;
+    let node = r.startContainer;
+    let offset = r.startOffset;
+    let p = textParaOf(node);
+    if (!p) {
+      const hit = nearestTextPara(topLevelIndex(node, offset));
+      if (!hit) return null;
+      p = hit.p;
+      node = p;
+      offset = hit.atEnd ? p.childNodes.length : 0;
+    }
+    const pre = document.createRange();
+    pre.selectNodeContents(p);
+    pre.setEnd(node, offset);
+    return {
+      para: Array.prototype.indexOf.call(editor.querySelectorAll('p'), p),
+      off: pre.toString().length,
+    };
+  }
+
+  function restoreCaret(pos) {
+    if (!pos) return;
+    const paras = editor.querySelectorAll('p');
+    if (!paras.length) return;
+    const p = paras[Math.min(pos.para, paras.length - 1)];
+    if (p.classList.contains('img-para')) {
+      const hit = nearestTextPara(topLevelIndex(p, 0));
+      if (hit) caretAtParaEdge(hit.p, hit.atEnd);
+      return;
+    }
+    let remain = pos.off;
+    const walker = document.createTreeWalker(p, NodeFilter.SHOW_TEXT);
+    let n;
+    let last = null;
+    while ((n = walker.nextNode())) {
+      const mk = closestEl(n, '.pb');
+      if (mk) {
+        // 改行マーカーの中には置かず、その前後に置く
+        if (remain <= 0) { setCaretBefore(mk); return; }
+        if (remain <= n.length) { setCaretAfter(mk); return; }
+      } else if (remain <= n.length) {
+        setCaret(n, remain);
+        return;
+      }
+      remain -= n.length;
+      last = n;
+    }
+    if (!last) setCaret(p, 0);
+    else if (closestEl(last, '.pb')) setCaretAfter(closestEl(last, '.pb'));
+    else setCaret(last, last.length);
+  }
+
   function isMarker(el) { return el.nodeType === 1 && el.classList.contains('pb'); }
 
   function cleanupEmpty(el) {
@@ -108,22 +235,32 @@
   }
 
   // ---------- スナップショット (undo/redo) ----------
+  // スナップショットは本文 HTML とその時点のキャレット位置の組。
+  // innerHTML を差し替えると Selection は #editor の先頭に潰れるので、
+  // キャレットも一緒に戻さないと次の入力が文書先頭に入ってしまう。
+  function captureState() {
+    return { html: editor.innerHTML, caret: serializeCaret() };
+  }
+  function applyState(state) {
+    editor.innerHTML = state.html;
+    editor.focus({ preventScroll: true });
+    restoreCaret(state.caret);
+    changed();
+  }
   function snapshot() {
-    undoStack.push(editor.innerHTML);
+    undoStack.push(captureState());
     if (undoStack.length > MAX_UNDO) undoStack.shift();
     redoStack.length = 0;
   }
   function undo() {
     if (!undoStack.length) return;
-    redoStack.push(editor.innerHTML);
-    editor.innerHTML = undoStack.pop();
-    changed();
+    redoStack.push(captureState());
+    applyState(undoStack.pop());
   }
   function redo() {
     if (!redoStack.length) return;
-    undoStack.push(editor.innerHTML);
-    editor.innerHTML = redoStack.pop();
-    changed();
+    undoStack.push(captureState());
+    applyState(redoStack.pop());
   }
 
   function changed() {
@@ -234,7 +371,8 @@
 
   // ---------- テキスト挿入 ----------
   function insertTextAtCaret(text) {
-    let r = getRange();
+    // 段落外にキャレットがあれば最寄りの段落へ寄せる（文書先頭には飛ばさない）
+    let r = normalizeCaret();
     if (!r) return;
     const del = inDel(r.startContainer);
     if (del) { setCaretAfter(del); r = getRange(); }
@@ -249,12 +387,7 @@
     } else {
       const el = document.createElement('ins');
       el.textContent = text;
-      const p = paraOf(r.startContainer) || editor.querySelector('p');
-      if (!paraOf(r.startContainer) && p) {
-        p.insertBefore(el, p.firstChild);
-      } else {
-        r.insertNode(el);
-      }
+      r.insertNode(el);
       const br = el.parentNode.nodeName === 'P' ? el.parentNode.querySelector(':scope > br') : null;
       if (br) br.remove();
       setCaret(el.firstChild, el.firstChild.length);
@@ -277,9 +410,9 @@
 
   // ---------- 段落分割（改行追加） ----------
   function splitParagraphAtCaret() {
-    const r = getRange();
+    const r = normalizeCaret();
     if (!r) return;
-    const p = paraOf(r.startContainer);
+    const p = textParaOf(r.startContainer);
     if (!p) return;
     const tail = document.createRange();
     tail.selectNodeContents(p);
@@ -380,7 +513,7 @@
   }
 
   function trackedDeleteChar(dir) {
-    const r = getRange();
+    const r = normalizeCaret();
     if (!r) return;
     snapshot();
     if (!r.collapsed) { trackedDeleteRange(r); changed(); return; }
@@ -476,10 +609,11 @@
   // ---------- IME(日本語入力)対応 ----------
   function onCompositionStart() {
     composing = true;
+    selectImage(null);
     snapshot();
-    let r = getRange();
+    let r = normalizeCaret();
     if (!r) return;
-    if (!r.collapsed) { trackedDeleteRange(r); r = getRange(); }
+    if (!r.collapsed) { trackedDeleteRange(r); r = normalizeCaret(); }
     if (!r) return;
     const del = inDel(r.startContainer);
     if (del) setCaretAfter(del);
@@ -521,6 +655,9 @@
   // ---------- beforeinput ハンドラ ----------
   function onBeforeInput(e) {
     if (composing || e.inputType === 'insertCompositionText') return;
+    // 文字の入力・削除に移ったら画像の選択は外す。残したままだと、
+    // 打った文字を直そうとした Backspace が画像の削除トグルになる
+    selectImage(null);
     switch (e.inputType) {
       case 'insertText':
       case 'insertReplacementText':
@@ -602,10 +739,19 @@
     const p = e.target.closest && e.target.closest('.img-para');
     if (p && editor.contains(p)) {
       selectImage(p);
-      // 直前の文字列選択が残るとコメント対象が曖昧になるので畳む
-      const sel = window.getSelection();
-      if (sel && sel.rangeCount && !sel.isCollapsed) sel.collapseToEnd();
-      editor.focus();
+      // 画像は contenteditable=false なのでクリックしてもキャレットは動かない。
+      // 未フォーカスの状態で focus() すると文書先頭にキャレットが置かれ、
+      // 続けて入力した文字が先頭に飛ぶ。そこで画像の隣（直後の段落の先頭、
+      // なければ直前の段落の末尾）に明示的に置く。直前の文字列選択も
+      // これで畳まれ、コメント対象が曖昧になることもない
+      editor.focus({ preventScroll: true });
+      const hit = nearestTextPara(topLevelIndex(p, 0));
+      if (hit) {
+        caretAtParaEdge(hit.p, hit.atEnd);
+      } else {
+        const sel = window.getSelection();
+        if (sel && sel.rangeCount && !sel.isCollapsed) sel.collapseToEnd();
+      }
     } else {
       selectImage(null);
     }

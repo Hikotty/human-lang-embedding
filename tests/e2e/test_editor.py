@@ -121,13 +121,56 @@ def test_backspace_at_paragraph_start_marks_newline_delete(review):
 
 def test_undo_redo(review):
     page, sid = review
-    select_in_editor(page, 0, 13, 13)
+    select_in_editor(page, 1, 4, 4)  # 「二段落目|の文章です。」
     page.keyboard.type("Z")
     expect(page.locator("#editor ins")).to_have_count(1)
     page.keyboard.press("Meta+z")
     expect(page.locator("#editor ins")).to_have_count(0)
     page.keyboard.press("Meta+Shift+z")
     expect(page.locator("#editor ins")).to_have_count(1)
+    # undo/redo は本文を丸ごと差し替えるが、キャレットは操作時の位置に戻る。
+    # 続けて入力しても文書先頭には飛ばず、redo で戻した追記の続きに入る
+    page.keyboard.type("Q")
+    paras = page.locator("#editor p")
+    expect(paras.nth(1)).to_have_text("二段落目ZQの文章です。")
+    expect(paras.nth(0)).to_have_text("これはAIが書いた文章です。")
+
+
+def test_typing_after_undo_stays_at_caret(review):
+    """undo 直後の入力が文書先頭に飛ばず、undo した位置に入る。
+
+    innerHTML の差し替えで Selection が #editor の先頭に潰れ、次の入力が
+    最初の段落に入ってしまう不具合の回帰テスト。
+    """
+    page, sid = review
+    select_in_editor(page, 1, 4, 4)
+    page.keyboard.type("Z")
+    page.keyboard.press("Meta+z")
+    expect(page.locator("#editor ins")).to_have_count(0)
+    page.keyboard.type("Q")
+    paras = page.locator("#editor p")
+    expect(paras.nth(1)).to_have_text("二段落目Qの文章です。")
+    expect(paras.nth(0)).to_have_text("これはAIが書いた文章です。")
+    wait_saved(page)
+    fb = feedback.build_feedback(storage.load_session(sid))
+    assert fb["result_text"] == "これはAIが書いた文章です。\n二段落目Qの文章です。"
+
+
+def test_ime_undo_then_typing_stays_at_caret(review):
+    """IME 変換確定 → Cmd+Z → 続けて入力、でも文書先頭に飛ばない。"""
+    page, sid = review
+    select_in_editor(page, 1, 4, 4)
+    cdp = page.context.new_cdp_session(page)
+    cdp.send("Input.imeSetComposition",
+             {"text": "にほんご", "selectionStart": 4, "selectionEnd": 4})
+    cdp.send("Input.insertText", {"text": "日本語"})
+    expect(page.locator("#editor ins")).to_have_text("日本語")
+    page.keyboard.press("Meta+z")
+    expect(page.locator("#editor ins")).to_have_count(0)
+    page.keyboard.type("Q")
+    paras = page.locator("#editor p")
+    expect(paras.nth(1)).to_have_text("二段落目Qの文章です。")
+    expect(paras.nth(0)).to_have_text("これはAIが書いた文章です。")
 
 
 def test_comment_flow_and_ai_reply_polling(review):
