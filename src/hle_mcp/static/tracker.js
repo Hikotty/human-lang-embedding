@@ -133,7 +133,7 @@
     let n;
     let target = null;
     while ((n = walker.nextNode())) {
-      if (closestEl(n, '.pb')) continue;
+      if (closestEl(n, '.pb') || closestEl(n, '.ai-del')) continue;
       target = n;
       if (!atEnd) break;
     }
@@ -179,9 +179,14 @@
     const pre = document.createRange();
     pre.selectNodeContents(p);
     pre.setEnd(node, offset);
+    // AI差分の幽霊テキストはスナップショットのHTMLに含まれないので、
+    // オフセットからも除いておく（復元はきれいなDOMの上で行われる）
+    const box = document.createElement('div');
+    box.appendChild(pre.cloneContents());
+    box.querySelectorAll('.ai-del').forEach((el) => el.remove());
     return {
       para: Array.prototype.indexOf.call(editor.querySelectorAll('p'), p),
-      off: pre.toString().length,
+      off: box.textContent.length,
     };
   }
 
@@ -235,11 +240,23 @@
   }
 
   // ---------- スナップショット (undo/redo) ----------
+  /* 保存・スナップショット用に、一時的な表示状態を落とした複製を作る。
+     AI差分の幽霊（span.ai-del）と選択・強調のclassは本文ではない */
+  function cleanedClone() {
+    const clone = editor.cloneNode(true);
+    clone.querySelectorAll('.ai-del').forEach((el) => el.remove());
+    clone.querySelectorAll('.sel, .active, .cmt-active, .ai-ins-obj')
+      .forEach((el) => {
+        el.classList.remove('sel', 'active', 'cmt-active', 'ai-ins-obj');
+      });
+    return clone;
+  }
+
   // スナップショットは本文 HTML とその時点のキャレット位置の組。
   // innerHTML を差し替えると Selection は #editor の先頭に潰れるので、
   // キャレットも一緒に戻さないと次の入力が文書先頭に入ってしまう。
   function captureState() {
-    return { html: editor.innerHTML, caret: serializeCaret() };
+    return { html: cleanedClone().innerHTML, caret: serializeCaret() };
   }
   function applyState(state) {
     editor.innerHTML = state.html;
@@ -264,6 +281,8 @@
   }
 
   function changed() {
+    // AI差分表示中は、編集でずれた幽霊・青字の割り付けをやり直す
+    if (aiDiffOps) applyAiOverlay();
     if (onChangeCb) onChangeCb();
   }
 
@@ -284,6 +303,7 @@
     let n;
     while ((n = walker.nextNode())) {
       if (!n.length) continue;
+      if (closestEl(n, '.ai-del')) continue; // AI差分の幽霊は本文ではない
       if (!range.intersectsNode(n)) continue;
       if (range.comparePoint(n, 0) === 0 &&
           range.comparePoint(n, n.length) === 0) {
@@ -316,6 +336,7 @@
     // 段落末尾のマーカー（kind: 'ins'|'del'）を返す
     for (let n = p.lastChild; n; n = n.previousSibling) {
       if (n.nodeType === 3 && n.data.replace(/\u200B/g, '') === '') continue;
+      if (n.nodeType === 1 && n.classList.contains('ai-del')) continue;
       if (n.nodeType === 1 && n.classList.contains('pb')) {
         if (n.tagName.toLowerCase() === kind) return n;
         continue;
@@ -443,7 +464,7 @@
     let n;
     while ((n = walker.nextNode())) {
       if (!n.length) continue;
-      if (closestEl(n, '.pb')) continue;
+      if (closestEl(n, '.pb') || closestEl(n, '.ai-del')) continue;
       if (n.data.replace(/\u200B/g, '') === '') continue;
       list.push(n);
     }
@@ -1041,7 +1062,8 @@
     const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
     let n;
     while ((n = walker.nextNode())) {
-      if (closestEl(n, '.pb') || closestEl(n, '.img-para')) continue;
+      if (closestEl(n, '.pb') || closestEl(n, '.img-para') ||
+          closestEl(n, '.ai-del')) continue;
       const clean = n.data.replace(/\u200B/g, '');
       if (!clean) continue;
       chunks.push({ node: n, start: total, clean: clean });
@@ -1092,6 +1114,296 @@
       return r;
     }
     return null;
+  }
+
+  // ---------- AI差分（前の稿とくらべてAIが変えた箇所の表示） ----------
+  // 前の稿の最終状態（人間の校正を反映したテキスト）と今の稿の base_text を
+  // 比べ、AIが消した文字を青い取り消し線の幽霊テキストで、AIが足した文字を
+  // 青字（CSS Custom Highlight）で重ねる。今の稿の base_text は人間が編集
+  // しても変わらない（編集は del/ins マークとして载るだけ）ので、差分は
+  // 表示を有効にしたとき一度だけ計算し、DOMへの割り付けだけを編集のたびに
+  // やり直す。幽霊（span.ai-del）は保存・undo・各種編集操作から除外される。
+  let aiDiffOps = null; // {dels:[{pos,text}], inss:[{start,end}]} base_text 座標
+
+  const AI_LINE_LIMIT = 2000;  // Myers差分の編集距離上限（行）
+  const AI_CHAR_LIMIT = 1000;  // 同（文字）。超えたら塊ごと置換として扱う
+
+  /* Myers O(ND) 差分。0=一致 / -1=aから削除 / 1=bへ追加 の配列を返す。
+     編集距離が limit を超えるときは null。 */
+  function myersOps(a, b, limit) {
+    const N = a.length;
+    const M = b.length;
+    let pre = 0;
+    while (pre < N && pre < M && a[pre] === b[pre]) pre++;
+    let suf = 0;
+    while (suf < N - pre && suf < M - pre && a[N - 1 - suf] === b[M - 1 - suf]) suf++;
+    const n = N - pre - suf;
+    const m = M - pre - suf;
+    const cap = Math.min(n + m, limit);
+    const off = cap + 1;
+    const v = new Int32Array(2 * cap + 3);
+    const trace = [];
+    let D = -1;
+    for (let d = 0; d <= cap && D < 0; d++) {
+      trace.push(v.slice());
+      for (let k = -d; k <= d; k += 2) {
+        let x;
+        if (k === -d || (k !== d && v[off + k - 1] < v[off + k + 1])) {
+          x = v[off + k + 1];
+        } else {
+          x = v[off + k - 1] + 1;
+        }
+        let y = x - k;
+        while (x < n && y < m && a[pre + x] === b[pre + y]) { x++; y++; }
+        v[off + k] = x;
+        if (x >= n && y >= m) { D = d; break; }
+      }
+    }
+    if (D < 0) return null;
+    const mid = [];
+    let x = n;
+    let y = m;
+    for (let d = D; d > 0; d--) {
+      const pv = trace[d];
+      const k = x - y;
+      let prevK;
+      if (k === -d || (k !== d && pv[off + k - 1] < pv[off + k + 1])) {
+        prevK = k + 1;
+      } else {
+        prevK = k - 1;
+      }
+      const px = pv[off + prevK];
+      const py = px - prevK;
+      while (x > px && y > py) { x--; y--; mid.push(0); }
+      if (x === px) { y--; mid.push(1); } else { x--; mid.push(-1); }
+    }
+    while (x > 0 && y > 0) { x--; y--; mid.push(0); }
+    mid.reverse();
+    return new Array(pre).fill(0).concat(mid, new Array(suf).fill(0));
+  }
+
+  /* 1行分の文字差分を dels/inss（b座標）へ書き足す。行同士が似ていない
+     （編集距離が長さの6割超）ときは行ごと置き換えとして扱い、細かい偶然の
+     一致でノイズだらけの差分を出さないようにする */
+  function charDiffLine(aLine, bLine, at, dels, inss) {
+    const lim = Math.min(AI_CHAR_LIMIT,
+      Math.ceil((aLine.length + bLine.length) * 0.6) + 1);
+    const ops = myersOps(aLine, bLine, lim);
+    if (!ops) {
+      if (aLine) dels.push({ pos: at, text: aLine });
+      if (bLine) inss.push({ start: at, end: at + bLine.length });
+      return;
+    }
+    let ap = 0;
+    let bp = 0;
+    let i = 0;
+    while (i < ops.length) {
+      if (ops[i] === 0) { ap++; bp++; i++; continue; }
+      const aStart = ap;
+      const bStart = bp;
+      while (i < ops.length && ops[i] !== 0) {
+        if (ops[i] < 0) ap++; else bp++;
+        i++;
+      }
+      if (ap > aStart) dels.push({ pos: at + bStart, text: aLine.slice(aStart, ap) });
+      if (bp > bStart) inss.push({ start: at + bStart, end: at + bp });
+    }
+  }
+
+  /* まず行単位で差分を取り、変わった塊の中だけ文字単位で詰める。
+     全面的な書き換えで上限を超えたときは全体を1つの置換として返す */
+  function computeAiDiff(prevText, baseText) {
+    const dels = [];
+    const inss = [];
+    if (prevText === baseText) return { dels: dels, inss: inss };
+    const a = prevText.split('\n');
+    const b = baseText.split('\n');
+    const starts = [0];
+    b.forEach((line) => starts.push(starts[starts.length - 1] + line.length + 1));
+    const total = baseText.length;
+    const lineOps = myersOps(a, b, AI_LINE_LIMIT);
+    if (!lineOps) {
+      dels.push({ pos: 0, text: prevText + '\n' });
+      inss.push({ start: 0, end: total });
+      return { dels: dels, inss: inss };
+    }
+    let ai = 0;
+    let bi = 0;
+    let i = 0;
+    while (i < lineOps.length) {
+      if (lineOps[i] === 0) { ai++; bi++; i++; continue; }
+      let dl = 0;
+      let il = 0;
+      while (i < lineOps.length && lineOps[i] !== 0) {
+        if (lineOps[i] < 0) dl++; else il++;
+        i++;
+      }
+      // 対応する行同士（先頭から順に組にする。行差分の塊の中に共通行は
+      // 無いので、素直な組み方でよい）は文字単位で差分を取る
+      const pairs = Math.min(dl, il);
+      for (let j = 0; j < pairs; j++) {
+        charDiffLine(a[ai + j], b[bi + j], starts[bi + j], dels, inss);
+      }
+      if (dl > pairs) {
+        // 行が丸ごと消えた: 改行ごと消えたことを次の行頭（末尾なら文末）に示す
+        const rest = a.slice(ai + pairs, ai + dl).join('\n');
+        if (bi + il >= b.length) dels.push({ pos: total, text: '\n' + rest });
+        else dels.push({ pos: starts[bi + il], text: rest + '\n' });
+      }
+      if (il > pairs) {
+        // 行が丸ごと増えた: 行の改行分まで範囲に含める（表示は行内に丸める）
+        const s0 = starts[bi + pairs];
+        const len = starts[bi + il] - s0 - 1;
+        inss.push(bi + il === b.length
+          ? { start: Math.max(0, s0 - 1), end: s0 + len }
+          : { start: s0, end: s0 + len + 1 });
+      }
+      ai += dl;
+      bi += il;
+    }
+    return { dels: dels, inss: inss };
+  }
+
+  /* 今のDOMから base_text の行と、行内オフセット→テキストノードの索引を作る。
+     人間の追加（ins）・改行マーカー・幽霊・ZWSPは base に無いので除く。
+     行の組み立ては feedback.py の compose_original と同じ規約に従う */
+  function baseIndex() {
+    const lines = [];
+    let cur = null;
+    let merge = false;
+    for (let el = editor.firstElementChild; el; el = el.nextElementSibling) {
+      if (el.tagName !== 'P') continue;
+      if (el.classList.contains('img-para')) {
+        if (el.dataset.ins) { merge = false; cur = null; continue; }
+        lines.push({ text: el.dataset.md || '', chunks: [], img: el, para: el });
+        cur = null;
+        merge = false;
+        continue;
+      }
+      if (!(merge && cur)) {
+        cur = { text: '', chunks: [], img: null, para: el };
+        lines.push(cur);
+      }
+      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      let n;
+      while ((n = walker.nextNode())) {
+        if (closestEl(n, '.pb') || closestEl(n, '.ai-del') || inIns(n)) continue;
+        const clean = n.data.replace(/\u200B/g, '');
+        if (!clean) continue;
+        cur.chunks.push({ node: n, start: cur.text.length, len: clean.length });
+        cur.text += clean;
+      }
+      merge = !!trailingMarker(el, 'ins');
+    }
+    const starts = [0];
+    lines.forEach((L) => starts.push(starts[starts.length - 1] + L.text.length + 1));
+    return { lines: lines, starts: starts };
+  }
+
+  function aiLineOf(idx, pos) {
+    let i = 0;
+    while (i + 1 < idx.lines.length && idx.starts[i + 1] <= pos) i++;
+    return i;
+  }
+
+  /* 行内オフセットを (テキストノード, ノード内オフセット) に写す */
+  function aiPointAt(L, col, isEnd) {
+    if (!L.chunks.length) return null;
+    col = Math.max(0, Math.min(col, L.text.length));
+    for (const c of L.chunks) {
+      const end = c.start + c.len;
+      const inside = isEnd ? (col > c.start && col <= end)
+        : (col >= c.start && col < end);
+      if (!inside) continue;
+      let need = col - c.start;
+      let raw = 0;
+      while (raw < c.node.length && need > 0) {
+        if (c.node.data[raw] !== ZWSP) need--;
+        raw++;
+      }
+      return { node: c.node, offset: raw };
+    }
+    const last = L.chunks[L.chunks.length - 1];
+    return col <= 0 ? { node: L.chunks[0].node, offset: 0 }
+      : { node: last.node, offset: last.node.length };
+  }
+
+  /* AIが消したテキストの幽霊表示。編集不可・選択不可で、保存もされない */
+  function injectAiDel(idx, pos, text) {
+    const li = aiLineOf(idx, pos);
+    const L = idx.lines[li];
+    const col = pos - idx.starts[li];
+    const span = document.createElement('span');
+    span.className = 'ai-del';
+    span.contentEditable = 'false';
+    span.textContent = text.replace(/\n/g, '\u00B6');
+    if (L.img) {
+      if (col <= 0) L.img.before(span); else L.img.after(span);
+      return;
+    }
+    const pt = aiPointAt(L, col, false);
+    if (!pt) {
+      const br = L.para.querySelector(':scope > br');
+      if (br) br.before(span); else L.para.appendChild(span);
+      return;
+    }
+    if (pt.offset <= 0) pt.node.before(span);
+    else if (pt.offset >= pt.node.length) pt.node.after(span);
+    else pt.node.splitText(pt.offset).before(span);
+  }
+
+  function clearAiOverlay() {
+    editor.querySelectorAll('span.ai-del').forEach((el) => el.remove());
+    editor.querySelectorAll('.ai-ins-obj').forEach((el) =>
+      el.classList.remove('ai-ins-obj'));
+    if (window.CSS && CSS.highlights) CSS.highlights.delete('hle-ai-ins');
+  }
+
+  function applyAiOverlay() {
+    clearAiOverlay();
+    if (!aiDiffOps || (!aiDiffOps.dels.length && !aiDiffOps.inss.length)) return;
+    const idx = baseIndex();
+    // 追加分のRangeを先に作る（幽霊挿入によるノード分割はRangeが追従する）
+    const ranges = [];
+    aiDiffOps.inss.forEach((ins) => {
+      for (let li = aiLineOf(idx, ins.start);
+           li < idx.lines.length && idx.starts[li] < ins.end; li++) {
+        const L = idx.lines[li];
+        const s = Math.max(ins.start, idx.starts[li]) - idx.starts[li];
+        const e = Math.min(ins.end, idx.starts[li] + L.text.length) - idx.starts[li];
+        if (L.img) { L.img.classList.add('ai-ins-obj'); continue; }
+        if (e <= s) continue;
+        const sp = aiPointAt(L, s, false);
+        const ep = aiPointAt(L, e, true);
+        if (!sp || !ep) continue;
+        const r = document.createRange();
+        r.setStart(sp.node, sp.offset);
+        r.setEnd(ep.node, ep.offset);
+        ranges.push(r);
+      }
+    });
+    // 幽霊は後ろの位置から入れる（手前の分割で座標がずれないように）
+    aiDiffOps.dels.slice().sort((x, y) => y.pos - x.pos).forEach((d) =>
+      injectAiDel(idx, d.pos, d.text));
+    if (window.CSS && CSS.highlights && window.Highlight) {
+      CSS.highlights.set('hle-ai-ins', new Highlight(...ranges));
+    }
+  }
+
+  /* AI差分表示の on/off。prevText（前の稿の最終テキスト）を渡すと有効化、
+     null で無効化。変更箇所の数を返す */
+  function setAiDiff(prevText) {
+    if (prevText == null) {
+      aiDiffOps = null;
+      clearAiOverlay();
+      return 0;
+    }
+    const idx = baseIndex();
+    const baseText = idx.lines.map((L) => L.text).join('\n');
+    aiDiffOps = computeAiDiff(
+      String(prevText).replace(/\r\n?/g, '\n'), baseText);
+    applyAiOverlay();
+    return aiDiffOps.dels.length + aiDiffOps.inss.length;
   }
 
   // ---------- 初期化 ----------
@@ -1156,14 +1468,11 @@
     getSelectedImage: getSelectedImage,
     getRange: getRange,
     findText: findText,
+    setAiDiff: setAiDiff,
     html: function () {
       if (!editor) return '';
-      // 選択・強調といった一時的な表示状態は保存しない
-      const clone = editor.cloneNode(true);
-      clone.querySelectorAll('.sel, .active, .cmt-active').forEach(function (el) {
-        el.classList.remove('sel', 'active', 'cmt-active');
-      });
-      return clone.innerHTML;
+      // 選択・強調・AI差分といった一時的な表示状態は保存しない
+      return cleanedClone().innerHTML;
     }
   };
 })();

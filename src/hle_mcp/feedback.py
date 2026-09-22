@@ -389,6 +389,23 @@ def build_html_feedback(session: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def revision_result_text(rev: dict[str, Any]) -> str:
+    """1つのリビジョンの校正後テキストを返す。
+
+    人間の編集を反映した結果を返し、編集が無ければ base_text をそのまま
+    返す。確定した旧リビジョンは edited_html が差分要約（feedback_summary）
+    に圧縮されているので、そちらの result_text を優先して使う。エディタの
+    「AI差分」表示が、前の稿の最終状態と今の稿の base_text を比べるために使う。
+    """
+    summary = rev.get("feedback_summary")
+    if summary and "result_text" in summary:
+        return str(summary["result_text"])
+    html = rev.get("edited_html")
+    if not html:
+        return str(rev["base_text"])
+    return compose_result(parse_edited_html(html))
+
+
 def build_feedback(session: dict[str, Any]) -> dict[str, Any]:
     """セッション全体からAI向けフィードバック構造を生成する。"""
     if session.get("mode") == "html":

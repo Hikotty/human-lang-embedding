@@ -28,6 +28,10 @@ html, body {
   padding: 6px 12px; font-size: 13px; cursor: pointer;
 }
 #actions button:hover { background: #f1f3f4; }
+/* AI差分表示のトグル。押されている間は青で示す */
+#actions button#btn-aidiff.on {
+  background: #e8f0fe; color: #1967d2; border-color: #1967d2;
+}
 /* 「#actions button」(1,0,1) より高い特異度にしないと背景白+文字白で不可視になる */
 #actions button#btn-complete {
   background: #1a73e8; color: #fff; border-color: #1a73e8;
@@ -168,6 +172,18 @@ html, body {
 /* アンカーを失ったコメントから引用文で飛んだ先。DOMに触れないよう
    Custom Highlight API で重ねる（保存されるHTMLに残らない） */
 ::highlight(hle-jump) { background: #fdd663; }
+
+/* ---------- AI差分表示 ----------
+   人間の変更（赤）と見分けられるよう、AIの変更は青で示す。
+   幽霊テキスト（.ai-del）は編集不可・選択不可で、保存もされない */
+#editor .ai-del {
+  color: #1967d2; text-decoration: line-through;
+  text-decoration-color: #1967d2; text-decoration-thickness: 1.5px;
+  background: rgba(25,103,210,.06); user-select: none;
+}
+::highlight(hle-ai-ins) { color: #1967d2; }
+/* AIが追加した画像の行は枠線で示す */
+#editor .img-para.ai-ins-obj { border-color: #1967d2; }
 
 /* ---------- 一時通知 ---------- */
 #toast {

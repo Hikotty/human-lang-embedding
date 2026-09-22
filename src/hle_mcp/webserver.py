@@ -259,7 +259,14 @@ class _Handler(BaseHTTPRequestHandler):
                 }
             )
         elif len(parts) == 3 and parts[:2] == ["api", "sessions"]:
-            self._send_json(storage.load_session(parts[2]))
+            s = storage.load_session(parts[2])
+            # エディタの「AI差分」表示用に、前の稿の最終状態（人間の校正を
+            # 反映したテキスト）を添える。第1稿には比較対象が無い
+            if storage.session_mode(s) == "md" and len(s["revisions"]) >= 2:
+                s["prev_result_text"] = feedback.revision_result_text(
+                    s["revisions"][-2]
+                )
+            self._send_json(s)
         else:
             self._send_error_json(404, "不明なパスです")
 

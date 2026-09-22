@@ -67,6 +67,7 @@
     $('#btn-comment').addEventListener('click', startCommentDraft);
     $('#btn-undo').addEventListener('click', () => Tracker.undo());
     $('#btn-redo').addEventListener('click', () => Tracker.redo());
+    initAiDiff();
     $('#btn-complete').addEventListener('click', completeReview);
     $('#draft-submit').addEventListener('click', submitDraft);
     $('#draft-cancel').addEventListener('click', cancelDraft);
@@ -91,6 +92,34 @@
       }
     });
     setSaveState('');
+  }
+
+  /* ---------- AI差分表示 ---------- */
+  /* 前の稿の最終状態（人間の校正を反映済み）と今の稿を比べ、AIが変えた
+     箇所を青で重ねる。人間の赤い変更と入り混じって読みにくくなり得るので
+     ボタンで気軽に出し入れできるようにし、状態はセッションごとに覚える。
+     第1稿には比較対象が無いのでボタン自体を出さない */
+  let aiDiffOn = false;
+
+  function setAiDiff(on) {
+    aiDiffOn = on;
+    const count = Tracker.setAiDiff(on ? session.prev_result_text : null);
+    $('#btn-aidiff').classList.toggle('on', on);
+    try {
+      if (on) localStorage.setItem('hle-aidiff-' + sid, '1');
+      else localStorage.removeItem('hle-aidiff-' + sid);
+    } catch (e) { /* localStorage が使えない環境では覚えない */ }
+    if (on && count === 0) toast('前の稿からAIによる変更はありません');
+  }
+
+  function initAiDiff() {
+    if (typeof session.prev_result_text !== 'string') return;
+    const btn = $('#btn-aidiff');
+    btn.hidden = false;
+    btn.addEventListener('click', () => setAiDiff(!aiDiffOn));
+    let saved = null;
+    try { saved = localStorage.getItem('hle-aidiff-' + sid); } catch (e) { /* 同上 */ }
+    if (saved === '1') setAiDiff(true);
   }
 
   function renderMeta() {
@@ -179,7 +208,11 @@
       draftTarget = { target: 'image', quote: img.md, image: img.name };
       showDraft(cid, '🖼 ' + img.name);
     } else {
-      const quote = r.toString().replace(/\u200B/g, '').slice(0, 300);
+      // AI差分の幽霊テキスト（.ai-del）と改行マーカーは引用に含めない
+      const box = document.createElement('div');
+      box.appendChild(r.cloneContents());
+      box.querySelectorAll('.ai-del, .pb').forEach((el) => el.remove());
+      const quote = box.textContent.replace(/\u200B/g, '').slice(0, 300);
       if (!Tracker.wrapRangeComment(r.cloneRange(), cid)) return;
       draftTarget = { target: 'text', quote: quote, image: '' };
       showDraft(cid, quote);
