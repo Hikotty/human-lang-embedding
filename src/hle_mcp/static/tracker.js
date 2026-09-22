@@ -1031,6 +1031,69 @@
     return { cls: '', prefix: '', body: raw };
   }
 
+  // ---------- 引用文の検索（コメントの位置へ飛ぶ用） ----------
+  /* 本文のテキストノードを連結した索引。コメントの quote は選択範囲の
+     toString() から ZWSP を除いたものなので、同じ土台（改行マーカーと
+     画像段落の中身を除き、ZWSP を取り除いた連結文字列）で照合する */
+  function textIndex() {
+    const chunks = [];
+    let total = 0;
+    const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
+    let n;
+    while ((n = walker.nextNode())) {
+      if (closestEl(n, '.pb') || closestEl(n, '.img-para')) continue;
+      const clean = n.data.replace(/\u200B/g, '');
+      if (!clean) continue;
+      chunks.push({ node: n, start: total, clean: clean });
+      total += clean.length;
+    }
+    return { chunks: chunks, text: chunks.map((c) => c.clean).join('') };
+  }
+
+  /* 索引上のオフセットを (node, ノード内オフセット) に写す。
+     ZWSP は索引に入っていないので、飛ばしながら数える */
+  function pointAt(idx, offset, isEnd) {
+    for (const c of idx.chunks) {
+      const end = c.start + c.clean.length;
+      const inside = isEnd ? (offset > c.start && offset <= end)
+        : (offset >= c.start && offset < end);
+      if (!inside) continue;
+      let need = offset - c.start;
+      let raw = 0;
+      while (raw < c.node.length && need > 0) {
+        if (c.node.data[raw] !== ZWSP) need--;
+        raw++;
+      }
+      return { node: c.node, offset: raw };
+    }
+    return null;
+  }
+
+  /* 引用文を本文から探して Range を返す。校正で文が書き換わっていて
+     完全一致しないときは、先頭・末尾の一部で探して近傍に寄せる */
+  function findText(quote) {
+    const q = String(quote || '').replace(/[\u200B\u00B6]/g, '').trim();
+    if (!q) return null;
+    const idx = textIndex();
+    const tries = [q];
+    [24, 12].forEach((n) => {
+      if (q.length > n) tries.push(q.slice(0, n).trim(), q.slice(-n).trim());
+    });
+    for (const key of tries) {
+      if (key.length < 6 && key !== q) continue;
+      const i = idx.text.indexOf(key);
+      if (i < 0) continue;
+      const s = pointAt(idx, i, false);
+      const e = pointAt(idx, i + key.length, true);
+      if (!s || !e) continue;
+      const r = document.createRange();
+      r.setStart(s.node, s.offset);
+      r.setEnd(e.node, e.offset);
+      return r;
+    }
+    return null;
+  }
+
   // ---------- 初期化 ----------
   function renderBase(text) {
     editor.textContent = '';
@@ -1092,6 +1155,7 @@
     insertImageParagraph: insertImageParagraph,
     getSelectedImage: getSelectedImage,
     getRange: getRange,
+    findText: findText,
     html: function () {
       if (!editor) return '';
       // 選択・強調といった一時的な表示状態は保存しない

@@ -71,6 +71,7 @@
     $('#draft-submit').addEventListener('click', submitDraft);
     $('#draft-cancel').addEventListener('click', cancelDraft);
     $('#editor').addEventListener('click', (e) => {
+      clearJumpHighlight();
       if (!e.target.closest) return;
       const span = e.target.closest('.cmt');
       if (span) { activateComment(span.dataset.cid, false); return; }
@@ -109,6 +110,7 @@
   /* ---------- 保存 ---------- */
   function onEdited() {
     dirty = true;
+    clearJumpHighlight();
     setSaveState('未保存…');
     clearTimeout(saveTimer);
     saveTimer = setTimeout(saveDoc, 700);
@@ -269,15 +271,27 @@
       '<button data-edit-cancel="1">キャンセル</button></div>';
   }
 
-  /* コメントの対象表示。画像コメントはサムネイルで何を指しているか示す */
+  /* 古い稿に付けたコメントは、今の本文では文が書き換わっていることがある。
+     どの稿への指摘かを添えて、飛んだ先が近傍になり得ることを伝える */
+  function revNote(c) {
+    const cur = session.revisions.length - 1;
+    if (typeof c.revision !== 'number' || c.revision >= cur) return '';
+    return '<span class="rev-note">第' + (c.revision + 1) + '稿への指摘</span>';
+  }
+
+  /* コメントの対象表示。画像コメントはサムネイルで何を指しているか示す。
+     クリックで本文の該当箇所へ飛ぶ */
   function quoteHtml(c, n) {
     if (c.target === 'image' && c.image) {
       const url = '/api/sessions/' + encodeURIComponent(sid) +
         '/files/' + encodeURIComponent(c.image);
-      return '<div class="quote img-quote"><img src="' + esc(url) +
-        '" alt=""><span>C' + n + ': ' + esc(c.image) + '</span></div>';
+      return '<div class="quote img-quote" title="クリックで本文の位置へ">' +
+        '<img src="' + esc(url) + '" alt=""><span>C' + n + ': ' +
+        esc(c.image) + '</span>' + revNote(c) + '</div>';
     }
-    return '<div class="quote">C' + n + ': ' + esc(c.quote) + '</div>';
+    // 引用は1行で省略表示されるので、稿の注記は先頭側に置いて隠れないようにする
+    return '<div class="quote" title="クリックで本文の位置へ">C' + n + ': ' +
+      revNote(c) + esc(c.quote) + '</div>';
   }
 
   function bodyHtml(cid, rid, o) {
@@ -430,11 +444,64 @@
         (p.dataset.cids || '').split(/\s+/).indexOf(cid) >= 0));
     document.querySelectorAll('.comment-card').forEach((card) =>
       card.classList.toggle('active', card.dataset.cid === cid));
-    const target = scrollEditor
-      ? (document.querySelector('#editor .cmt[data-cid="' + cid + '"]') ||
-         document.querySelector('#editor .img-para[data-cids~="' + cid + '"]'))
-      : document.querySelector('.comment-card[data-cid="' + cid + '"]');
-    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    clearJumpHighlight();
+    if (scrollEditor) {
+      jumpToComment(cid);
+      return;
+    }
+    const card = document.querySelector('.comment-card[data-cid="' + cid + '"]');
+    if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+
+  /* ---------- コメントの位置へ飛ぶ ---------- */
+  /* 本文側のアンカー（.cmt span、画像段落の data-cids）はその稿の編集HTML
+     にしか無い。AIが次の稿を出すと本文は作り直されてアンカーは消えるが、
+     コメントはセッションに残る。そこでアンカーが無いときは、引用文を今の
+     本文から探して飛び、見つけた範囲を一時的に強調する。 */
+  function jumpToComment(cid) {
+    const anchored =
+      document.querySelector('#editor .cmt[data-cid="' + cid + '"]') ||
+      document.querySelector('#editor .img-para[data-cids~="' + cid + '"]');
+    if (anchored) {
+      anchored.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
+    }
+    const c = session.comments.find((x) => x.id === cid);
+    if (!c) return;
+    if (c.target === 'image' && c.image) {
+      const p = Array.prototype.find.call(
+        document.querySelectorAll('#editor .img-para'),
+        (el) => el.dataset.img === c.image);
+      if (!p) { toast('この画像は今の本文にありません'); return; }
+      p.classList.add('cmt-active');
+      p.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
+    }
+    const range = Tracker.findText(c.quote);
+    if (!range) {
+      toast('引用文が今の本文に見つかりません（書き換わっています）');
+      return;
+    }
+    const sc = range.startContainer;
+    const el = sc.nodeType === Node.ELEMENT_NODE ? sc : sc.parentElement;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    // 本文のDOMには触らず（保存されるHTMLに残さない）ハイライトだけ重ねる
+    if (window.CSS && CSS.highlights && window.Highlight) {
+      CSS.highlights.set('hle-jump', new Highlight(range));
+    }
+  }
+
+  function clearJumpHighlight() {
+    if (window.CSS && CSS.highlights) CSS.highlights.delete('hle-jump');
+  }
+
+  let toastTimer = null;
+  function toast(msg) {
+    const el = $('#toast');
+    el.textContent = msg;
+    el.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { el.hidden = true; }, 2500);
   }
 
   /* ---------- ポーリング（AI返信・新リビジョン検知） ---------- */

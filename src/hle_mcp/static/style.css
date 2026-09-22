@@ -165,6 +165,16 @@ html, body {
 /* ---------- コメントハイライト ---------- */
 #editor .cmt { background: #feefc3; border-bottom: 2px solid #f9ab00; cursor: pointer; }
 #editor .cmt.active { background: #fdd663; }
+/* アンカーを失ったコメントから引用文で飛んだ先。DOMに触れないよう
+   Custom Highlight API で重ねる（保存されるHTMLに残らない） */
+::highlight(hle-jump) { background: #fdd663; }
+
+/* ---------- 一時通知 ---------- */
+#toast {
+  position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);
+  background: #3c4043; color: #fff; font-size: 13px; padding: 8px 14px;
+  border-radius: 6px; box-shadow: 0 2px 8px rgba(0,0,0,.25); z-index: 20;
+}
 
 /* ---------- サイドバー ---------- */
 #sidebar {
@@ -188,6 +198,11 @@ html, body {
 }
 .comment-card .quote.img-quote img {
   width: 46px; height: 32px; object-fit: cover; border-radius: 3px; flex: none;
+}
+.comment-card .quote .rev-note {
+  display: inline-block; margin: 0 6px 0 2px; color: #b06000; font-size: 10px;
+  border: 1px solid #f9ab00; border-radius: 8px; padding: 0 5px;
+  vertical-align: middle; flex: none;
 }
 .comment-card .quote.img-quote span {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

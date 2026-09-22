@@ -102,6 +102,8 @@
       '::highlight(hle-comment){background:rgba(255,213,79,.5);}' +
       '::highlight(hle-active){background:rgba(255,152,0,.65);}' +
       '::highlight(hle-draft){background:rgba(255,152,0,.5);}' +
+      // 位置を特定できなくなったコメントから引用文で飛んだ先（一時的）
+      '::highlight(hle-jump){background:rgba(255,152,0,.65);}' +
       // 画像・図は文字の選択で示せないので要素ごと枠線で囲む。
       // 属性だけを使い、本文テキスト（アンカーの拠り所）には触れない
       '[data-hle-obj]{outline:3px solid rgba(249,171,0,.85);' +
@@ -314,6 +316,7 @@
   /* ハイライト済みの本文をクリックしたら対応するコメントを選択する。
      画像・図のクリックは「コメント対象の指定」として扱う */
   function onFrameClick(e) {
+    clearJumpHighlight();
     const doc = frameDoc();
     const obj = e.target.closest && e.target.closest(OBJ_SELECTOR);
     if (obj) {
@@ -459,6 +462,14 @@
       '<button class="danger" data-del="' + key + '">削除</button></div>';
   }
 
+  /* 古い稿に付けたコメントは今のページでは文が書き換わっていることがある。
+     どの稿への指摘かを添え、飛んだ先が近傍になり得ることを伝える */
+  function revNote(c) {
+    const cur = session.revisions.length - 1;
+    if (typeof c.revision !== 'number' || c.revision >= cur) return '';
+    return '<span class="rev-note">第' + (c.revision + 1) + '稿への指摘</span>';
+  }
+
   function renderComments() {
     const list = $('#comment-list');
     if (!session.comments.length) {
@@ -476,7 +487,8 @@
       return '<div class="comment-card' +
         (c.id === activeCid ? ' active' : '') +
         '" data-cid="' + esc(c.id) + '">' +
-        '<div class="quote">C' + (i + 1) + ': ' +
+        '<div class="quote" title="クリックでページの位置へ">C' + (i + 1) + ': ' +
+        revNote(c) +
         esc(c.target === 'image' ? '🖼 ' + (c.image || c.quote) : c.quote) +
         '</div>' +
         authorLabel(c.author) +
@@ -596,20 +608,76 @@
     document.querySelectorAll('.comment-card').forEach((card) =>
       card.classList.toggle('active', card.dataset.cid === cid));
     paintHighlights();
-    const range = scrollFrame ? anchors.get(cid) : null;
-    const el = scrollFrame
-      ? (objAnchors.get(cid) || (range && (
-          range.startContainer.nodeType === Node.ELEMENT_NODE
-            ? range.startContainer : range.startContainer.parentElement)))
-      : null;
-    if (el && el.scrollIntoView) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }
+    clearJumpHighlight();
     if (!scrollFrame) {
       const card = document.querySelector(
         '.comment-card[data-cid="' + cid + '"]');
       if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
     }
+    jumpToComment(cid);
+  }
+
+  /* ---------- コメントの位置へ飛ぶ ---------- */
+  function rangeElement(range) {
+    const sc = range.startContainer;
+    return sc.nodeType === Node.ELEMENT_NODE ? sc : sc.parentElement;
+  }
+
+  /* 位置が解決できているコメントはそこへ。新しい稿で文が書き換わって
+     解決できなくなったコメントは、引用文の先頭・末尾の一部で探して
+     近傍へ飛び、見つけた範囲を一時的に強調する */
+  function jumpToComment(cid) {
+    const el = objAnchors.get(cid) ||
+      (anchors.has(cid) ? rangeElement(anchors.get(cid)) : null);
+    if (el && el.scrollIntoView) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
+    }
+    const c = session.comments.find((x) => x.id === cid);
+    const doc = frameDoc();
+    if (!c || !doc || !doc.body) return;
+    if (c.target === 'image') {
+      toast('この画像・図は今のページで見つかりません');
+      return;
+    }
+    const q = String(c.quote || '').trim();
+    const idx = textIndex();
+    const tries = [];
+    [24, 12].forEach((n) => {
+      if (q.length > n) {
+        tries.push({ quote: q.slice(0, n).trim(), prefix: c.prefix || '' });
+        tries.push({ quote: q.slice(-n).trim(), suffix: c.suffix || '' });
+      }
+    });
+    for (const t of tries) {
+      if (t.quote.length < 6) continue;
+      const pos = locate(idx, t);
+      const r = pos && rangeFromOffsets(idx, pos.start, pos.end);
+      if (!r) continue;
+      rangeElement(r).scrollIntoView({ behavior: 'smooth', block: 'center' });
+      const win = frameWin();
+      if (win && win.CSS && win.CSS.highlights && win.Highlight) {
+        win.CSS.highlights.set('hle-jump', new win.Highlight(r));
+      }
+      return;
+    }
+    toast('引用文が今のページに見つかりません（書き換わっています）');
+  }
+
+  function clearJumpHighlight() {
+    const win = frameWin();
+    if (win && win.CSS && win.CSS.highlights) win.CSS.highlights.delete('hle-jump');
+  }
+
+  let toastTimer = null;
+  function toast(msg) {
+    const el = $('#toast');
+    if (!el) return;
+    el.textContent = msg;
+    el.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { el.hidden = true; }, 2500);
   }
 
   /* ---------- ポーリング（AI返信・新リビジョン検知） ---------- */
