@@ -41,7 +41,39 @@ def _status_of(err_or_call):
 def test_health(web_port):
     status, data = _get(web_port, "/api/health")
     assert status == 200
-    assert data == {"app": "hle-mcp", "ok": True}
+    assert data["app"] == "hle-mcp" and data["ok"] is True
+    # 稼働中のコードの版とディスク上の版を報告する（古いサーバーの検出用）
+    assert data["version"] == data["disk_version"]
+    assert len(data["version"]) == 12
+    # テスト用のスレッド起動はスーパーバイザー管理下ではない
+    assert data["supervised"] is False and data["supervisor_pid"] is None
+
+
+def test_every_response_carries_build_version(web_port):
+    """開いているページが新しい版を知れるよう、全応答に版を載せる。"""
+    s = storage.create_session("t", "d", "")
+    versions = set()
+    for path in ("/api/health", f"/api/sessions/{s['id']}", "/static/app.js"):
+        with urllib.request.urlopen(f"http://127.0.0.1:{web_port}{path}") as res:
+            versions.add(res.headers.get("X-HLE-Version"))
+    assert len(versions) == 1 and None not in versions
+
+
+def test_post_document_with_revision_guard(web_port):
+    """前の稿への保存は新しい稿を上書きせず、stale として退避される。"""
+    s = storage.create_session("初稿", "d", "")
+    path = f"/api/sessions/{s['id']}/document"
+    _, data = _post(web_port, path, {"html": "<p>A</p>", "revision": 0})
+    assert data == {"ok": True, "stale": False}
+    storage.add_revision(s["id"], "第二稿")
+    _, data = _post(web_port, path, {"html": "<p>B</p>", "revision": 0})
+    assert data == {"ok": True, "stale": True}
+    loaded = storage.load_session(s["id"])
+    assert loaded["revisions"][1]["edited_html"] is None
+    assert loaded["revisions"][0]["late_edited_html"] == "<p>B</p>"
+    for bad in (5, "0", True):
+        assert _status_of(lambda: _post(
+            web_port, path, {"html": "<p>x</p>", "revision": bad})) == 400
 
 
 def test_index_and_session_page_serve_html(web_port):

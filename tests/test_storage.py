@@ -34,9 +34,33 @@ def test_invalid_session_id_raises():
 
 def test_set_document_updates_current_revision():
     s = storage.create_session("t", "d", "")
-    storage.set_document(s["id"], "<p>edited</p>")
+    assert storage.set_document(s["id"], "<p>edited</p>") is True
     loaded = storage.load_session(s["id"])
     assert loaded["revisions"][-1]["edited_html"] == "<p>edited</p>"
+    # 稿の番号を明示しても同じ
+    assert storage.set_document(s["id"], "<p>again</p>", revision=0) is True
+    assert storage.load_session(s["id"])["revisions"][0]["edited_html"] \
+        == "<p>again</p>"
+
+
+def test_set_document_for_old_revision_is_kept_aside():
+    """AIの新しい稿の後に届いた前の稿の編集は、新しい稿を上書きせず退避する。"""
+    s = storage.create_session("初稿", "d", "")
+    storage.set_document(s["id"], "<p>初稿<ins>A</ins></p>")
+    storage.add_revision(s["id"], "第二稿")
+    assert storage.set_document(s["id"], "<p>初稿<ins>AB</ins></p>", revision=0) \
+        is False
+    loaded = storage.load_session(s["id"])
+    assert loaded["revisions"][1]["edited_html"] is None  # 新しい稿は無傷
+    assert loaded["revisions"][0]["late_edited_html"] == "<p>初稿<ins>AB</ins></p>"
+    assert loaded["revisions"][0]["late_edited_at"]
+
+
+@pytest.mark.parametrize("bad", [1, 5, -1])
+def test_set_document_rejects_unknown_revision(bad):
+    s = storage.create_session("t", "d", "")
+    with pytest.raises(ValueError):
+        storage.set_document(s["id"], "<p>x</p>", revision=bad)
 
 
 def test_set_status_valid_and_invalid():

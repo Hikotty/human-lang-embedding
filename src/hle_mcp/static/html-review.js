@@ -23,9 +23,33 @@
       opts.body = JSON.stringify(body);
     }
     const res = await fetch(path, opts);
+    noteServerVersion(res.headers.get('X-HLE-Version'));
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
     return data;
+  }
+
+  /* 常駐Webサーバーが新しい版に入れ替わったら、再読み込みを促す。
+     このページの本文は編集しないので、書きかけのコメントだけ気にすればよい */
+  let loadedVersion = null;
+  let updateNoticeShown = false;
+
+  function noteServerVersion(v) {
+    if (!v) return;
+    if (loadedVersion === null) { loadedVersion = v; return; }
+    if (v === loadedVersion || updateNoticeShown) return;
+    const banner = document.getElementById('update-banner');
+    if (!banner) return;
+    updateNoticeShown = true;
+    banner.hidden = false;
+  }
+
+  function reloadForUpdate() {
+    if ((draft || sidebarBusy()) &&
+        !window.confirm('書きかけのコメントは消えます。再読み込みしますか？')) {
+      return;
+    }
+    location.reload();
   }
 
   function fmtDate(iso) {
@@ -74,6 +98,7 @@
     $('#btn-complete').addEventListener('click', completeReview);
     $('#draft-submit').addEventListener('click', submitDraft);
     $('#draft-cancel').addEventListener('click', cancelDraft);
+    $('#btn-update-reload').addEventListener('click', reloadForUpdate);
     setInterval(pollRemote, 2500);
   }
 

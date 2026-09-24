@@ -11,9 +11,39 @@
       opts.body = JSON.stringify(body);
     }
     const res = await fetch(path, opts);
+    noteServerVersion(res.headers.get('X-HLE-Version'));
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
     return data;
+  }
+
+  /* ---------- 新しい版の通知 ----------
+     常駐Webサーバーはコードが更新されると無停止で新しい版に入れ替わるが、
+     開いているページのJSは古いまま。応答ヘッダの版が読み込み時と変わったら
+     再読み込みを促す（自動では読み込み直さない。入力中を邪魔しないため） */
+  let loadedVersion = null;
+  let updateNoticeShown = false;
+
+  function noteServerVersion(v) {
+    if (!v) return;
+    if (loadedVersion === null) { loadedVersion = v; return; }
+    if (v === loadedVersion || updateNoticeShown || !session) return;
+    const banner = document.getElementById('update-banner');
+    if (!banner) return;
+    updateNoticeShown = true;
+    banner.hidden = false;
+  }
+
+  async function reloadForUpdate() {
+    // 保存を済ませてから読み込み直す。保存できなくてもブラウザに退避して
+    // あれば読み込み後に復元されるので進めてよい
+    const saved = await saveDoc();
+    if (!saved && !backupOk) {
+      alert('保存できていない校正があるため、今は再読み込みできません。\n' +
+        '接続が戻ると自動で保存されます。');
+      return;
+    }
+    location.reload();
   }
 
   function fmtDate(iso) {
@@ -34,6 +64,7 @@
   /* ================= エディタ画面 ================= */
   let session = null;
   let sid = null;
+  let revIndex = 0;   // 編集している稿の番号（保存先の取り違えを防ぐ）
   let dirty = false;
   let saveTimer = null;
   let draftCid = null;
@@ -52,11 +83,14 @@
     }
     document.title = session.title + ' - 校正レビュー';
     const rev = session.revisions[session.revisions.length - 1];
-    Tracker.init($('#editor'), rev.base_text, rev.edited_html, onEdited,
+    revIndex = rev.index;
+    const initialHtml = await takeBackup(rev);
+    Tracker.init($('#editor'), rev.base_text, initialHtml.html, onEdited,
       { sessionId: sid, onImageFile: handleImageFile,
         onImageCommentsDropped: dropImageComments });
     renderMeta();
     renderComments();
+    $('#btn-update-reload').addEventListener('click', reloadForUpdate);
     $('#btn-image').addEventListener('click', () => $('#image-input').click());
     $('#image-input').addEventListener('change', (e) => {
       if (e.target.files && e.target.files.length) {
@@ -84,14 +118,21 @@
     setInterval(pollRemote, 2500);
     window.addEventListener('beforeunload', () => {
       if (dirty) {
+        // 送れなくてもブラウザに退避してあるので、次に開いたとき復元される
         navigator.sendBeacon(
           '/api/sessions/' + sid + '/document',
-          new Blob([JSON.stringify({ html: Tracker.html() })],
+          new Blob([JSON.stringify({ html: Tracker.html(), revision: revIndex })],
             { type: 'application/json' })
         );
       }
     });
     setSaveState('');
+    if (initialHtml.restored) {
+      dirty = true;
+      toast('保存できていなかった校正をブラウザから復元しました');
+      saveDoc();
+    }
+    showLateNotice();
   }
 
   /* ---------- AI差分表示 ---------- */
@@ -136,30 +177,145 @@
     $('#btn-complete').textContent = done ? '✔ 校正完了済み' : '✔ 校正完了';
   }
 
-  /* ---------- 保存 ---------- */
+  /* ---------- ブラウザへの退避 ----------
+     校正内容はサーバーが保存を受け付けるまでブラウザ（localStorage）にも
+     置いておく。サーバーの入れ替え・停止中に打った分や、保存前にタブを
+     閉じた分も、次に開いたときに復元してから保存し直せる。 */
+  let backupOk = true; // 退避できているか（できない環境では再読み込みを慎重にする）
+
+  function backupKey() { return 'hle-backup-' + sid; }
+
+  function readBackup() {
+    try {
+      const b = JSON.parse(localStorage.getItem(backupKey()) || 'null');
+      return b && typeof b.html === 'string' && typeof b.rev === 'number' ? b : null;
+    } catch (e) { return null; }
+  }
+
+  function writeBackup() {
+    try {
+      localStorage.setItem(backupKey(), JSON.stringify(
+        { rev: revIndex, html: Tracker.html(), at: Date.now() }));
+      backupOk = true;
+    } catch (e) {
+      backupOk = false;
+    }
+  }
+
+  function dropBackupIfSaved(html) {
+    const b = readBackup();
+    if (b && b.rev === revIndex && b.html === html) {
+      try { localStorage.removeItem(backupKey()); } catch (e) { /* 無視 */ }
+    }
+  }
+
+  /* 読み込み時に退避分を確かめ、エディタに載せるHTMLを決める。
+     同じ稿への退避がサーバーの内容と違えば、保存できていなかった分なので
+     そちらを使う。前の稿への退避（AIが次の稿を出す前に保存できなかった分）は
+     新しい稿には載せられないので、前の稿の控えとしてサーバーに預けて消す */
+  async function takeBackup(rev) {
+    const b = readBackup();
+    if (!b) return { html: rev.edited_html, restored: false };
+    if (b.rev === rev.index) {
+      if (b.html !== (rev.edited_html || '')) return { html: b.html, restored: true };
+    } else if (b.rev < rev.index) {
+      try {
+        await api('/api/sessions/' + sid + '/document', 'POST',
+          { html: b.html, revision: b.rev });
+        markLateNotice();
+      } catch (e) {
+        return { html: rev.edited_html, restored: false }; // 次の機会に預け直す
+      }
+    }
+    try { localStorage.removeItem(backupKey()); } catch (e) { /* 無視 */ }
+    return { html: rev.edited_html, restored: false };
+  }
+
+  /* 前の稿への校正が遅れて届いた（AIの新しい稿には反映されない）ことを、
+     再読み込み後の画面で知らせる */
+  function markLateNotice() {
+    try { sessionStorage.setItem('hle-late-' + sid, '1'); } catch (e) { /* 無視 */ }
+  }
+
+  function showLateNotice() {
+    let flag = null;
+    try { flag = sessionStorage.getItem('hle-late-' + sid); } catch (e) { /* 無視 */ }
+    if (!flag) return;
+    try { sessionStorage.removeItem('hle-late-' + sid); } catch (e) { /* 無視 */ }
+    toast('AIの新しい稿が届く前の校正の一部は、前の稿の控えとして保存しました' +
+      '（新しい稿には反映されていません）');
+  }
+
+  /* ---------- 保存 ----------
+     保存は1本ずつ直列に送る（並行すると古い内容が後から届いて新しい内容を
+     上書きしうる）。失敗したら間隔を広げながら自動で再試行し、成功するまで
+     「未保存」の状態とブラウザへの退避を保つ。 */
+  const RETRY_STEPS = [1000, 2000, 4000, 8000, 15000];
+  let saving = null;       // 送信中の保存（Promise）
+  let saveAgain = false;   // 送信中に新しい保存要求が来た
+  let retryTimer = null;
+  let retryCount = 0;
+
   function onEdited() {
     dirty = true;
+    writeBackup();
     clearJumpHighlight();
-    setSaveState('未保存…');
+    if (!retryTimer) setSaveState('未保存…');
     clearTimeout(saveTimer);
     saveTimer = setTimeout(saveDoc, 700);
   }
 
-  async function saveDoc() {
-    if (!dirty) return;
-    dirty = false;
-    setSaveState('保存中…');
-    try {
-      await api('/api/sessions/' + sid + '/document', 'POST',
-        { html: Tracker.html() });
-      setSaveState(dirty ? '未保存…' : '保存済み');
-    } catch (e) {
-      dirty = true;
-      setSaveState('保存失敗');
+  /* 保存を実行し、未保存の変更が残っていなければ true を返す */
+  function saveDoc() {
+    clearTimeout(saveTimer);
+    if (saving) {
+      saveAgain = true;
+      return saving;
     }
+    saving = runSaves().finally(() => { saving = null; });
+    return saving;
   }
 
-  function setSaveState(text) { $('#save-state').textContent = text; }
+  async function runSaves() {
+    do {
+      saveAgain = false;
+      if (!dirty) continue;
+      dirty = false;
+      clearTimeout(retryTimer);
+      retryTimer = null;
+      const html = Tracker.html();
+      setSaveState('保存中…');
+      let res;
+      try {
+        res = await api('/api/sessions/' + sid + '/document', 'POST',
+          { html: html, revision: revIndex });
+      } catch (e) {
+        dirty = true;
+        scheduleRetry();
+        return false;
+      }
+      retryCount = 0;
+      dropBackupIfSaved(html);
+      if (res && res.stale) markLateNotice();
+      setSaveState(dirty ? '未保存…' : '保存済み');
+    } while (saveAgain);
+    return !dirty;
+  }
+
+  function scheduleRetry() {
+    const wait = RETRY_STEPS[Math.min(retryCount, RETRY_STEPS.length - 1)];
+    retryCount++;
+    setSaveState(backupOk ? '保存できません・再試行中…（ブラウザに退避済み）'
+      : '保存できません・再試行中…', true);
+    clearTimeout(retryTimer);
+    retryTimer = setTimeout(() => { retryTimer = null; saveDoc(); }, wait);
+  }
+
+  function setSaveState(text, warn) {
+    const el = $('#save-state');
+    el.textContent = text;
+    el.classList.toggle('warn', !!warn);
+  }
 
   /* ---------- 画像 ---------- */
   async function handleImageFile(file) {
@@ -552,10 +708,15 @@
       remote = await api('/api/sessions/' + sid);
     } catch (e) { return; }
     if (remote.revisions.length !== session.revisions.length) {
+      // 前の稿への未保存分を保存してから読み込み直す。サーバーは稿の番号を
+      // 見て、新しい稿を上書きせず前の稿の控えとして受け取る。保存できな
+      // かった分もブラウザに退避してあるので、読み込み後に預け直される
       if (dirty) await saveDoc();
       location.reload();
       return;
     }
+    // サーバーが応答するようになったら、再試行の待ち時間を待たずに保存する
+    if (dirty && retryTimer) saveDoc();
     if (remote.status !== session.status) {
       session.status = remote.status;
       renderMeta();
@@ -572,7 +733,12 @@
   async function completeReview() {
     clearTimeout(saveTimer);
     dirty = true;
-    await saveDoc();
+    // 保存できていない校正があるまま完了にすると、AIは古い内容を受け取る
+    if (!(await saveDoc())) {
+      alert('校正内容を保存できていないため、校正完了にできません。\n' +
+        '接続が戻ると自動で保存されるので、少し待ってからもう一度押してください。');
+      return;
+    }
     try {
       await api('/api/sessions/' + sid + '/status', 'POST',
         { status: 'reviewed' });

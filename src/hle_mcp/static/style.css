@@ -185,6 +185,24 @@ html, body {
 /* AIが追加した画像の行は枠線で示す */
 #editor .img-para.ai-ins-obj { border-color: #1967d2; }
 
+/* 保存できずに再試行している間は目立たせる */
+#save-state.warn { color: #c5221f; font-weight: 600; }
+
+/* ---------- 新しい版の通知 ---------- */
+#update-banner {
+  position: fixed; top: 64px; left: 50%; transform: translateX(-50%);
+  max-width: 720px; background: #e8f0fe; color: #174ea6;
+  border: 1px solid #1a73e8; border-radius: 8px; padding: 8px 12px;
+  font-size: 13px; box-shadow: 0 2px 8px rgba(0,0,0,.15); z-index: 30;
+  display: flex; align-items: center; gap: 10px;
+}
+#update-banner[hidden] { display: none; }
+#update-banner button {
+  border: 1px solid #1a73e8; background: #1a73e8; color: #fff;
+  border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer;
+  flex: none;
+}
+
 /* ---------- 一時通知 ---------- */
 #toast {
   position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);

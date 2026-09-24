@@ -48,6 +48,17 @@ def _port() -> int:
     return int(os.environ.get("HLE_PORT", webserver.DEFAULT_PORT))
 
 
+def _with_server_note(port: int, payload: dict) -> dict:
+    """Webサーバーが最新コードで動いていなければ、その旨を応答に添える。
+
+    人間に「新しい機能が画面に出ない」と言われたときの手がかりになる。
+    """
+    note = webserver.server_note(port)
+    if note:
+        payload["server_note"] = note
+    return payload
+
+
 def _open_browser(url: str) -> bool:
     if os.environ.get("HLE_NO_BROWSER"):
         return False
@@ -208,7 +219,7 @@ def open_review(
     url = webserver.session_url(port, session["id"])
     opened = _open_browser(url)
     return _dumps(
-        {
+        _with_server_note(port, {
             "session_id": session["id"],
             "title": session["title"],
             "mode": mode,
@@ -221,7 +232,7 @@ def open_review(
                 "レビューセッションを作成しました。人間の校正完了の連絡を受けたら "
                 "get_feedback で結果を取得してください。"
             ),
-        }
+        })
     )
 
 
@@ -311,7 +322,7 @@ def submit_revision(
     url = webserver.session_url(port, session_id)
     opened = _open_browser(url) if open_browser else False
     return _dumps(
-        {
+        _with_server_note(port, {
             "session_id": session_id,
             "revision_index": session["revisions"][-1]["index"],
             "url": url,
@@ -319,7 +330,7 @@ def submit_revision(
             "missing_images": missing,
             "browser_opened": opened,
             "message": "修正稿を登録しました。人間の再校正を待ってください。",
-        }
+        })
     )
 
 

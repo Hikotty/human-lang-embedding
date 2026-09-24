@@ -7,7 +7,6 @@ ID・タイトル・ワークスペースでの検索を提供する。
 from __future__ import annotations
 
 import json
-import os
 import re
 import threading
 import uuid
@@ -15,9 +14,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-_LOCK = threading.RLock()
+from . import versioning
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_LOCK = threading.RLock()
 
 # セッションID・コメントIDに許可する文字。パス要素やHTML属性に埋め込むため
 # 英数字・ハイフン・アンダースコアのみに限定する。
@@ -25,9 +24,12 @@ _ID_PATTERN = r"[A-Za-z0-9_-]{1,64}"
 
 
 def data_dir() -> Path:
-    """データ保存ディレクトリ（環境変数 HLE_DATA_DIR で上書き可能）。"""
-    root = Path(os.environ.get("HLE_DATA_DIR", _PROJECT_ROOT / "data"))
-    return root
+    """データ保存ディレクトリ（環境変数 HLE_DATA_DIR で上書き可能）。
+
+    常駐Webサーバーのログや状態ファイルも同じ場所に置くので、
+    定義は versioning.data_dir に一本化している。
+    """
+    return versioning.data_dir()
 
 
 def sessions_dir() -> Path:
@@ -154,13 +156,31 @@ def current_revision(session: dict[str, Any]) -> dict[str, Any]:
     return session["revisions"][-1]
 
 
-def set_document(session_id: str, html: str) -> dict[str, Any]:
-    """ブラウザで編集されたHTMLを現行リビジョンに保存する。"""
+def set_document(
+    session_id: str, html: str, revision: int | None = None
+) -> bool:
+    """ブラウザで編集されたHTMLを保存し、それが現行リビジョンへの保存かを返す。
+
+    revision はブラウザが編集していた稿の番号。AIが新しい稿を出した直後に
+    前の稿の編集が届くと、そのまま現行リビジョンに書くと新しい稿を前の稿の
+    HTMLで上書きしてしまう。そこで稿がずれていたら元の稿の late_edited_html
+    に退避して捨てずに残し、False を返す（現行リビジョンには触れない）。
+    revision を省略した場合は現行リビジョンへ保存する（旧クライアント互換）。
+    """
     with _LOCK:
         s = load_session(session_id)
-        current_revision(s)["edited_html"] = html
+        cur = current_revision(s)
+        if revision is None or revision == cur["index"]:
+            cur["edited_html"] = html
+            save_session(s)
+            return True
+        if not isinstance(revision, int) or not 0 <= revision < cur["index"]:
+            raise ValueError(f"不正なリビジョン番号: {revision!r}")
+        rev = s["revisions"][revision]
+        rev["late_edited_html"] = html
+        rev["late_edited_at"] = _now()
         save_session(s)
-        return s
+        return False
 
 
 def set_status(session_id: str, status: str) -> dict[str, Any]:
