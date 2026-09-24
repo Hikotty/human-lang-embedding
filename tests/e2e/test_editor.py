@@ -200,7 +200,7 @@ def test_comment_flow_and_ai_reply_polling(review):
         "改善案を検討します", timeout=8000)
 
     # 人間が返信への返信を送る（複数ラリー）
-    page.fill(f'input[data-reply="{cid}"]', "お願いします")
+    page.fill(f'textarea[data-reply="{cid}"]', "お願いします")
     page.click(f'button[data-send="{cid}"]')
     expect(page.locator(".comment-card .reply")).to_have_count(2)
     session = storage.load_session(sid)

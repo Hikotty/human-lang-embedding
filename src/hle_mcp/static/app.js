@@ -492,6 +492,21 @@
       '<button class="danger" data-del="' + key + '">削除</button></div>';
   }
 
+  /* 返信欄。長い返信も書けるよう textarea にし、書いた分だけ伸ばす（CSS） */
+  function replyRowHtml(cid) {
+    return '<div class="reply-row"><textarea rows="1" placeholder="返信を入力" ' +
+      'title="Enterで送信、Shift+Enterで改行" data-reply="' + esc(cid) +
+      '"></textarea><button data-send="' + esc(cid) + '">送信</button></div>';
+  }
+
+  /* Enter で送信し、Shift+Enter は改行として入力させる。IMEの変換を確定する
+     Enter では送らない（Safari は確定のkeydownで isComposing が false に
+     なることがあるので keyCode 229 も見る） */
+  function isSendKey(e) {
+    return e.key === 'Enter' && !e.shiftKey && !e.isComposing &&
+      e.keyCode !== 229;
+  }
+
   function renderComments() {
     const list = $('#comment-list');
     if (!session.comments.length) {
@@ -512,9 +527,7 @@
         authorLabel(c.author) +
         '<span class="when">' + esc(fmtDate(c.created_at)) + '</span>' +
         editedMark(c) + bodyHtml(c.id, null, c) +
-        replies +
-        '<div class="reply-row"><input placeholder="返信を入力" data-reply="' +
-        esc(c.id) + '"><button data-send="' + esc(c.id) + '">送信</button></div>' +
+        replies + replyRowHtml(c.id) +
         '</div>';
     }).join('');
     list.querySelectorAll('.comment-card').forEach((card) => {
@@ -526,9 +539,12 @@
     list.querySelectorAll('button[data-send]').forEach((btn) => {
       btn.addEventListener('click', () => sendReply(btn.dataset.send));
     });
-    list.querySelectorAll('input[data-reply]').forEach((inp) => {
-      inp.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && !e.isComposing) sendReply(inp.dataset.reply);
+    list.querySelectorAll('textarea[data-reply]').forEach((ta) => {
+      ta.addEventListener('keydown', (e) => {
+        if (isSendKey(e)) {
+          e.preventDefault();
+          sendReply(ta.dataset.reply);
+        }
       });
     });
     list.querySelectorAll('button[data-edit]').forEach((btn) => {
@@ -552,6 +568,8 @@
     if (ta) {
       ta.focus();
       ta.setSelectionRange(ta.value.length, ta.value.length);
+      // 高さの上限を超える長文は欄の中でスクロールするので、末尾を見せる
+      ta.scrollTop = ta.scrollHeight;
     }
   }
 
@@ -608,8 +626,8 @@
   }
 
   async function sendReply(cid) {
-    const inp = document.querySelector('input[data-reply="' + cid + '"]');
-    const text = (inp.value || '').trim();
+    const ta = document.querySelector('textarea[data-reply="' + cid + '"]');
+    const text = (ta.value || '').trim();
     if (!text) return;
     try {
       const reply = await api(

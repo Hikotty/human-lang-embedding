@@ -245,7 +245,8 @@ html, body {
 .comment-card .who.ai { color: #1967d2; }
 .comment-card .who.human { color: #b06000; }
 .comment-card .when { color: #9aa0a6; font-size: 10px; }
-.comment-card .body { margin: 4px 0 6px; white-space: pre-wrap; }
+/* URLのような切れ目のない長い文字列でもカードの枠からはみ出さないよう折り返す */
+.comment-card .body { margin: 4px 0 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
 /* 編集・削除の操作行。常時見えると騒がしいので薄く置き、ホバーで際立たせる */
 .comment-card .card-actions {
   display: flex; gap: 6px; margin-top: 2px;
@@ -265,14 +266,18 @@ html, body {
 }
 .comment-card textarea.edit-text {
   width: 100%; border: 1px solid #1a73e8; border-radius: 6px;
-  padding: 6px 8px; font-size: 13px; margin: 4px 0; resize: vertical;
+  padding: 6px 8px; font-size: 13px; margin: 4px 0;
   font-family: inherit;
 }
 .comment-card .reply { border-top: 1px solid #f1f3f4; padding: 6px 0 2px; }
-.comment-card .reply-row { display: flex; gap: 6px; margin-top: 6px; }
-.comment-card .reply-row input {
-  flex: 1; border: 1px solid #dadce0; border-radius: 6px;
-  padding: 5px 8px; font-size: 12px;
+/* 返信欄は複数行になり得るので、送信ボタンは最終行の横に揃える */
+.comment-card .reply-row {
+  display: flex; gap: 6px; margin-top: 6px; align-items: flex-end;
+}
+.comment-card .reply-row textarea {
+  /* min-width: 0 がないと、折り返せない長い文字列で欄が行からはみ出す */
+  flex: 1; min-width: 0; border: 1px solid #dadce0; border-radius: 6px;
+  padding: 5px 8px; font-size: 12px; font-family: inherit;
 }
 .comment-card .reply-row button, #comment-draft button {
   border: 1px solid #1a73e8; background: #1a73e8; color: #fff;
@@ -291,9 +296,31 @@ html, body {
 }
 #comment-draft textarea {
   width: 100%; border: 1px solid #dadce0; border-radius: 6px;
-  padding: 6px 8px; font-size: 13px; resize: vertical;
+  padding: 6px 8px; font-size: 13px;
 }
 #comment-draft .row { display: flex; gap: 8px; margin-top: 6px; }
+
+/* ---------- コメント入力欄の自動伸長 ----------
+   下書き・編集・返信の欄は、書いた分だけ縦に伸びる（field-sizing: content）。
+   field-sizing: content では rows が効かないので、最低の高さは min-height で
+   持つ（14px は上下の padding と border）。伸びすぎて「追加」「保存」などの
+   ボタンが画面外に押し出されないよう、max-height を超えたら欄の中で
+   スクロールする */
+#comment-draft textarea,
+.comment-card textarea.edit-text,
+.comment-card .reply-row textarea {
+  line-height: 1.5; max-height: 60vh; overflow-y: auto; resize: vertical;
+}
+#comment-draft textarea,
+.comment-card textarea.edit-text { min-height: calc(3lh + 14px); }
+/* 手で広げても次の入力で内容の高さに戻るので、伸びる環境ではつまみを出さない。
+   field-sizing に未対応のブラウザは rows の固定の高さのまま、手で広げられる */
+@supports (field-sizing: content) {
+  #comment-draft textarea,
+  .comment-card textarea.edit-text,
+  .comment-card .reply-row textarea { field-sizing: content; resize: none; }
+}
+
 .empty-note { color: #9aa0a6; font-size: 12px; text-align: center; margin-top: 30px; }
 
 /* ---------- 一覧ビュー ---------- */
