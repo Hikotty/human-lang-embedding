@@ -321,6 +321,33 @@ html, body {
   .comment-card .reply-row textarea { field-sizing: content; resize: none; }
 }
 
+/* ---------- コメントの種類（指摘・質問） ----------
+   指摘はコメントのハイライトと同じ黄色、質問は紫で見分ける。
+   管理画面のコメント一覧でも同じバッジを使う */
+.tag-badge {
+  display: inline-block; font-size: 10px; font-weight: 700; line-height: 1.5;
+  border: 1px solid; border-radius: 8px; padding: 0 6px; margin-right: 6px;
+}
+.tag-badge.issue { color: #b06000; border-color: #f9ab00; background: #fffbec; }
+.tag-badge.question { color: #8430ce; border-color: #c58af9; background: #f3e8fd; }
+.tag-field { margin: 0 0 6px; }
+.tag-select { display: flex; gap: 6px; }
+.tag-select label {
+  display: inline-flex; align-items: center; gap: 4px; cursor: pointer;
+  border: 1px solid #dadce0; border-radius: 12px; padding: 1px 10px 1px 6px;
+  font-size: 12px; color: #5f6368; background: #fff;
+}
+.tag-select input { margin: 0; }
+.tag-select label.issue input { accent-color: #b06000; }
+.tag-select label.question input { accent-color: #8430ce; }
+.tag-select label.issue:has(input:checked) {
+  color: #b06000; border-color: #f9ab00; background: #fffbec; font-weight: 700;
+}
+.tag-select label.question:has(input:checked) {
+  color: #8430ce; border-color: #c58af9; background: #f3e8fd; font-weight: 700;
+}
+.tag-hint { font-size: 11px; color: #5f6368; margin-top: 3px; }
+
 .empty-note { color: #9aa0a6; font-size: 12px; text-align: center; margin-top: 30px; }
 
 /* ---------- 一覧ビュー ---------- */

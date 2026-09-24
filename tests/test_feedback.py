@@ -272,6 +272,29 @@ def test_comment_view_defaults_to_text_target():
     assert "image" not in c
 
 
+# ---------- コメントの種類（指摘・質問） ----------
+
+def test_comment_view_exposes_tag_with_issue_default():
+    """コメントに tag が現れる。tag を持たない（旧データの）コメントは指摘。"""
+    s = storage.create_session("本文", "種類", "/tmp/x")
+    storage.add_comment(s["id"], quote="本文", text="直して", comment_id="c1")
+    storage.add_comment(s["id"], quote="本文", text="これは何？",
+                        comment_id="c2", tag="question")
+    comments = feedback.build_feedback(storage.load_session(s["id"]))["comments"]
+    assert [(c["id"], c["tag"]) for c in comments] \
+        == [("c1", "issue"), ("c2", "question")]
+
+
+def test_html_feedback_exposes_tag_and_explains_it():
+    """HTMLレビューのフィードバックにも tag があり、note が扱いを説明する。"""
+    s = storage.create_session("<p>本文</p>", "HTML種類", "/tmp/x", mode="html")
+    storage.add_comment(s["id"], quote="本文", text="これは何？", tag="question")
+    fb = feedback.build_feedback(storage.load_session(s["id"]))
+    assert fb["comments"][0]["tag"] == "question"
+    assert 'tag="question"' in fb["note"]
+    assert "reply_comment" in fb["note"]
+
+
 # ---------- マーカー記号のエスケープ ----------
 def test_escape_markers_roundtrip():
     """【】〖〗と \\ を可逆にエスケープする。"""

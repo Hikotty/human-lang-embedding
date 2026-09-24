@@ -62,6 +62,13 @@
     return html;
   }
 
+  /* コメントの種類。指摘は修正稿に反映され、質問は返信で答えるだけになる */
+  function tagBadge(c) {
+    return c.tag === 'question'
+      ? '<span class="tag-badge question">質問</span>'
+      : '<span class="tag-badge issue">指摘</span>';
+  }
+
   function renderComments(comments) {
     if (!comments || !comments.length) {
       return '<div class="meta">コメントはありません</div>';
@@ -77,8 +84,9 @@
         return '<div class="reply">' + rwho + esc(r.text) + '</div>';
       }).join('');
       return '<div class="admin-comment">' +
-        '<div><b>C' + (c.number || i + 1) + '</b> 「' + esc(c.quote) +
-        '」</div><div>' + who + esc(c.text) + '</div>' + replies + '</div>';
+        '<div><b>C' + (c.number || i + 1) + '</b> ' + tagBadge(c) + '「' +
+        esc(c.quote) + '」</div><div>' + who + esc(c.text) + '</div>' +
+        replies + '</div>';
     }).join('');
   }
 

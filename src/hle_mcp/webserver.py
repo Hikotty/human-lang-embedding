@@ -439,6 +439,7 @@ class _Handler(BaseHTTPRequestHandler):
                 target=str(body.get("target", "") or "text"),
                 image=str(body.get("image", "") or ""),
                 image_ref=str(body.get("image_ref", "") or ""),
+                tag=str(body.get("tag", "") or storage.DEFAULT_COMMENT_TAG),
             )
             self._send_json(comment)
         elif parts[3] == "comments" and len(parts) == 6 and parts[5] == "replies":
@@ -452,8 +453,11 @@ class _Handler(BaseHTTPRequestHandler):
         # 更新・削除もPOSTのサブパスで受ける。DELETE/PATCHを増やすと
         # _guard_reason のOrigin/Content-Type検査がPOST限定なので穴になる。
         elif parts[3] == "comments" and len(parts) == 6 and parts[5] == "update":
+            # tag を送らない更新（旧クライアント）は種類を変えない
+            tag = body.get("tag")
             comment = storage.update_comment(
-                sid, parts[4], str(body.get("text", ""))
+                sid, parts[4], str(body.get("text", "")),
+                tag=None if tag is None else str(tag),
             )
             self._send_json(comment)
         elif parts[3] == "comments" and len(parts) == 6 and parts[5] == "delete":

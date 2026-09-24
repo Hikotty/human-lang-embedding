@@ -410,3 +410,55 @@ def test_image_comment_requires_image_identity():
     s = storage.create_session("t", "d", "")
     with pytest.raises(ValueError):
         storage.add_comment(s["id"], "q", "t", target="image")
+
+
+# ---------- コメントの種類（指摘・質問） ----------
+def test_add_comment_defaults_to_issue_without_tag_key():
+    """既定（指摘）ではキーを増やさず従来の形を保つ。"""
+    s = storage.create_session("本文", "d", "")
+    c = storage.add_comment(s["id"], quote="本", text="直して")
+    assert "tag" not in c
+
+
+def test_add_question_comment_keeps_tag():
+    s = storage.create_session("本文", "d", "")
+    c = storage.add_comment(s["id"], quote="本", text="これは何？", tag="question")
+    assert c["tag"] == "question"
+    assert storage.load_session(s["id"])["comments"][0]["tag"] == "question"
+
+
+@pytest.mark.parametrize("bad", ["", "Question", "指摘", "fix", "issue "])
+def test_add_comment_rejects_unknown_tag(bad):
+    s = storage.create_session("t", "d", "")
+    with pytest.raises(ValueError):
+        storage.add_comment(s["id"], "q", "t", tag=bad)
+    assert storage.load_session(s["id"])["comments"] == []
+
+
+def test_update_comment_switches_tag_both_ways():
+    s = storage.create_session("t", "d", "")
+    storage.add_comment(s["id"], "q", "元", comment_id="c1")
+    c = storage.update_comment(s["id"], "c1", "質問に変える", tag="question")
+    assert c["tag"] == "question"
+    c = storage.update_comment(s["id"], "c1", "指摘に戻す", tag="issue")
+    assert "tag" not in c  # 既定に戻すとキーごと消える
+    assert "tag" not in storage.load_session(s["id"])["comments"][0]
+
+
+def test_update_comment_without_tag_keeps_kind():
+    """tag を渡さない更新（旧クライアント）は種類を変えない。"""
+    s = storage.create_session("t", "d", "")
+    storage.add_comment(s["id"], "q", "元", comment_id="c1", tag="question")
+    c = storage.update_comment(s["id"], "c1", "本文だけ直す")
+    assert c["tag"] == "question"
+
+
+def test_update_comment_rejects_bad_tag_without_touching_comment():
+    """不正な tag なら本文も書き換えない（途中まで反映しない）。"""
+    s = storage.create_session("t", "d", "")
+    storage.add_comment(s["id"], "q", "元", comment_id="c1")
+    with pytest.raises(ValueError):
+        storage.update_comment(s["id"], "c1", "書き換え", tag="bogus")
+    c = storage.load_session(s["id"])["comments"][0]
+    assert c["text"] == "元"
+    assert "updated_at" not in c

@@ -379,6 +379,9 @@
     draftCid = cid;
     $('#comment-draft').hidden = false;
     $('#draft-quote').textContent = label;
+    // 種類は毎回「指摘」から始める（前の下書きの選択を持ち越さない）
+    $('#draft-tag').innerHTML = tagSelectHtml('draft-tag', 'issue');
+    bindTagSelect($('#draft-tag'));
     $('#draft-text').value = '';
     $('#draft-text').focus();
   }
@@ -390,7 +393,7 @@
     try {
       const comment = await api('/api/sessions/' + sid + '/comments', 'POST',
         { id: draftCid, quote: t.quote, text: text, author: 'human',
-          target: t.target, image: t.image });
+          target: t.target, image: t.image, tag: selectedTag('draft-tag') });
       session.comments.push(comment);
       draftCid = null;
       draftTarget = null;
@@ -430,6 +433,53 @@
       : '<span class="who human">あなた</span>';
   }
 
+  /* ---------- コメントの種類（指摘・質問） ----------
+     指摘（issue）は本文を直してほしいもの、質問（question）は答えてほしい
+     だけのもの。AIは get_feedback の tag を見て、修正稿に反映するか、返信で
+     答えるだけにするかを分ける。既定は指摘で、tag の無い旧データも指摘 */
+  const TAG_LABELS = { issue: '指摘', question: '質問' };
+  const TAG_HINTS = {
+    issue: 'AIはこの指摘を踏まえて本文を直します',
+    question: 'AIは返信で答えるだけで、本文は直しません',
+  };
+
+  function tagOf(c) {
+    return c && c.tag === 'question' ? 'question' : 'issue';
+  }
+
+  function tagBadge(c) {
+    const t = tagOf(c);
+    return '<span class="tag-badge ' + t + '" title="' + esc(TAG_HINTS[t]) +
+      '">' + TAG_LABELS[t] + '</span>';
+  }
+
+  /* 種類の選択欄。name はページ内で一意にする（下書きと編集フォームで別） */
+  function tagSelectHtml(name, current) {
+    const cur = current === 'question' ? 'question' : 'issue';
+    const opts = ['issue', 'question'].map((t) =>
+      '<label class="' + t + '"><input type="radio" name="' + name +
+      '" value="' + t + '"' + (t === cur ? ' checked' : '') + '>' +
+      TAG_LABELS[t] + '</label>').join('');
+    return '<div class="tag-field"><div class="tag-select" role="radiogroup" ' +
+      'aria-label="コメントの種類">' + opts + '</div>' +
+      '<div class="tag-hint">' + esc(TAG_HINTS[cur]) + '</div></div>';
+  }
+
+  /* 選び直したら、AIがそのコメントをどう扱うかの説明を切り替える */
+  function bindTagSelect(root) {
+    root.querySelectorAll('.tag-field input[type="radio"]').forEach((r) => {
+      r.addEventListener('change', () => {
+        const hint = r.closest('.tag-field').querySelector('.tag-hint');
+        if (hint) hint.textContent = TAG_HINTS[r.value] || '';
+      });
+    });
+  }
+
+  function selectedTag(name) {
+    const r = document.querySelector('input[name="' + name + '"]:checked');
+    return r && r.value === 'question' ? 'question' : 'issue';
+  }
+
   /* ---------- コメント/返信の編集・削除 ---------- */
   /* 対象は "コメントID" または "コメントID|返信ID" のキーで指す。
      コメントIDは [A-Za-z0-9_-] に制限されているので "|" と衝突しない。 */
@@ -451,9 +501,11 @@
     return o.updated_at ? '<span class="when">（編集済み）</span>' : '';
   }
 
-  function editFormHtml(cid, rid, text) {
+  /* 編集フォーム。種類（指摘・質問）はコメント本体にだけあり、返信には無い */
+  function editFormHtml(cid, rid, text, tag) {
     const key = targetKey(cid, rid);
-    return '<textarea class="edit-text" rows="3" data-edit-input="' + key +
+    return (rid ? '' : tagSelectHtml('edit-tag', tag)) +
+      '<textarea class="edit-text" rows="3" data-edit-input="' + key +
       '">' + esc(text) + '</textarea>' +
       '<div class="card-actions edit-actions">' +
       '<button class="primary" data-edit-save="' + key + '">保存</button>' +
@@ -461,11 +513,12 @@
   }
 
   /* 古い稿に付けたコメントは、今の本文では文が書き換わっていることがある。
-     どの稿への指摘かを添えて、飛んだ先が近傍になり得ることを伝える */
+     どの稿への指摘（質問）かを添えて、飛んだ先が近傍になり得ることを伝える */
   function revNote(c) {
     const cur = session.revisions.length - 1;
     if (typeof c.revision !== 'number' || c.revision >= cur) return '';
-    return '<span class="rev-note">第' + (c.revision + 1) + '稿への指摘</span>';
+    return '<span class="rev-note">第' + (c.revision + 1) + '稿への' +
+      TAG_LABELS[tagOf(c)] + '</span>';
   }
 
   /* コメントの対象表示。画像コメントはサムネイルで何を指しているか示す。
@@ -484,7 +537,7 @@
   }
 
   function bodyHtml(cid, rid, o) {
-    if (isEditing(cid, rid)) return editFormHtml(cid, rid, o.text);
+    if (isEditing(cid, rid)) return editFormHtml(cid, rid, o.text, tagOf(o));
     const key = targetKey(cid, rid);
     return '<div class="body">' + esc(o.text) + '</div>' +
       '<div class="card-actions">' +
@@ -524,15 +577,18 @@
         (c.id === activeCid ? ' active' : '') +
         '" data-cid="' + esc(c.id) + '">' +
         quoteHtml(c, i + 1) +
-        authorLabel(c.author) +
+        // 編集中は選択欄が種類を示すので、保存済みの種類のバッジは出さない
+        (isEditing(c.id, null) ? '' : tagBadge(c)) + authorLabel(c.author) +
         '<span class="when">' + esc(fmtDate(c.created_at)) + '</span>' +
         editedMark(c) + bodyHtml(c.id, null, c) +
         replies + replyRowHtml(c.id) +
         '</div>';
     }).join('');
+    bindTagSelect(list);
     list.querySelectorAll('.comment-card').forEach((card) => {
       card.addEventListener('click', (e) => {
-        if (e.target.closest('input,button,textarea')) return;
+        // 種類の選択（label）を押しても本文へは飛ばない
+        if (e.target.closest('input,button,textarea,label')) return;
         activateComment(card.dataset.cid, true);
       });
     });
@@ -583,14 +639,17 @@
     }
     const base = '/api/sessions/' + sid + '/comments/' + t.cid;
     const path = t.rid ? base + '/replies/' + t.rid + '/update' : base + '/update';
+    const body = { text: text };
+    if (!t.rid) body.tag = selectedTag('edit-tag');
     try {
-      const updated = await api(path, 'POST', { text: text });
+      const updated = await api(path, 'POST', body);
       const c = session.comments.find((x) => x.id === t.cid);
       if (c && t.rid) {
         const r = (c.replies || []).find((x) => x.id === t.rid);
         if (r) Object.assign(r, updated);
       } else if (c) {
-        Object.assign(c, updated);
+        // 指摘に戻すとサーバーは tag キーを消すので、合成せずに置き換える
+        session.comments[session.comments.indexOf(c)] = updated;
       }
       editing = null;
       renderComments();

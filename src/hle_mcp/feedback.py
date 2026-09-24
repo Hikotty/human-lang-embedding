@@ -327,6 +327,10 @@ def compose_changes(paragraphs: list[_Paragraph]) -> list[dict[str, Any]]:
 def _comment_view(comment: dict[str, Any], number: int) -> dict[str, Any]:
     """コメント1件をAI向けの形に整える。
 
+    tag はコメントの種類。"issue"（指摘）は修正稿に反映するもの、
+    "question"（質問）は返信で答えるだけで本文は変えないもの。tag を
+    持たない旧データは指摘として扱う（保存層の既定と同じ）。
+
     target="image" は文字列ではなく画像そのものへの指摘。image が対象の名前
     （mdモードでは添付画像のファイル名）、image_ref はHTMLレビューで対象要素を
     「タグ名:出現順」で指すアンカー。
@@ -334,6 +338,7 @@ def _comment_view(comment: dict[str, Any], number: int) -> dict[str, Any]:
     view = {
         "number": number,
         "id": comment["id"],
+        "tag": comment.get("tag", "issue"),
         "revision": comment.get("revision", 0),
         "quote": comment.get("quote", ""),
         "text": comment.get("text", ""),
@@ -385,6 +390,9 @@ def build_html_feedback(session: dict[str, Any]) -> dict[str, Any]:
             'target="image" のコメントは画像や図そのものへの指摘で、'
             "image_ref が対象要素を「タグ名:出現順（0起点）」で指す"
             "（例 img:2 はソース中3番目の <img>、svg:0 は最初の <svg>）。"
+            'tag="question" のコメントは質問なので reply_comment で答える'
+            "だけにし、それを理由にファイルを直さない（tag=\"issue\" の指摘は"
+            "修正に反映する）。"
         ),
     }
 

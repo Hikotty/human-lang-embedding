@@ -405,6 +405,9 @@
     paintHighlights();
     $('#comment-draft').hidden = false;
     $('#draft-quote').textContent = label;
+    // 種類は毎回「指摘」から始める（前の下書きの選択を持ち越さない）
+    $('#draft-tag').innerHTML = tagSelectHtml('draft-tag', 'issue');
+    bindTagSelect($('#draft-tag'));
     $('#draft-text').value = '';
     $('#draft-text').focus();
   }
@@ -414,7 +417,7 @@
     if (!text) { $('#draft-text').focus(); return; }
     const body = {
       id: draft.cid, quote: draft.quote, text: text, author: 'human',
-      target: draft.target || 'text',
+      target: draft.target || 'text', tag: selectedTag('draft-tag'),
     };
     if (draft.target === 'image') {
       body.image = draft.image;
@@ -450,6 +453,49 @@
       : '<span class="who human">あなた</span>';
   }
 
+  /* ---------- コメントの種類（指摘・質問。app.jsと同じ） ----------
+     指摘は本文を直してほしいもの、質問は答えてほしいだけのもの */
+  const TAG_LABELS = { issue: '指摘', question: '質問' };
+  const TAG_HINTS = {
+    issue: 'AIはこの指摘を踏まえて本文を直します',
+    question: 'AIは返信で答えるだけで、本文は直しません',
+  };
+
+  function tagOf(c) {
+    return c && c.tag === 'question' ? 'question' : 'issue';
+  }
+
+  function tagBadge(c) {
+    const t = tagOf(c);
+    return '<span class="tag-badge ' + t + '" title="' + esc(TAG_HINTS[t]) +
+      '">' + TAG_LABELS[t] + '</span>';
+  }
+
+  function tagSelectHtml(name, current) {
+    const cur = current === 'question' ? 'question' : 'issue';
+    const opts = ['issue', 'question'].map((t) =>
+      '<label class="' + t + '"><input type="radio" name="' + name +
+      '" value="' + t + '"' + (t === cur ? ' checked' : '') + '>' +
+      TAG_LABELS[t] + '</label>').join('');
+    return '<div class="tag-field"><div class="tag-select" role="radiogroup" ' +
+      'aria-label="コメントの種類">' + opts + '</div>' +
+      '<div class="tag-hint">' + esc(TAG_HINTS[cur]) + '</div></div>';
+  }
+
+  function bindTagSelect(root) {
+    root.querySelectorAll('.tag-field input[type="radio"]').forEach((r) => {
+      r.addEventListener('change', () => {
+        const hint = r.closest('.tag-field').querySelector('.tag-hint');
+        if (hint) hint.textContent = TAG_HINTS[r.value] || '';
+      });
+    });
+  }
+
+  function selectedTag(name) {
+    const r = document.querySelector('input[name="' + name + '"]:checked');
+    return r && r.value === 'question' ? 'question' : 'issue';
+  }
+
   /* ---------- コメント/返信の編集・削除（app.jsと同じキー方式） ---------- */
   function targetKey(cid, rid) {
     return esc(cid) + (rid ? '|' + esc(rid) : '');
@@ -469,9 +515,11 @@
     return o.updated_at ? '<span class="when">（編集済み）</span>' : '';
   }
 
-  function editFormHtml(cid, rid, text) {
+  /* 編集フォーム。種類（指摘・質問）はコメント本体にだけあり、返信には無い */
+  function editFormHtml(cid, rid, text, tag) {
     const key = targetKey(cid, rid);
-    return '<textarea class="edit-text" rows="3" data-edit-input="' + key +
+    return (rid ? '' : tagSelectHtml('edit-tag', tag)) +
+      '<textarea class="edit-text" rows="3" data-edit-input="' + key +
       '">' + esc(text) + '</textarea>' +
       '<div class="card-actions edit-actions">' +
       '<button class="primary" data-edit-save="' + key + '">保存</button>' +
@@ -479,7 +527,7 @@
   }
 
   function bodyHtml(cid, rid, o) {
-    if (isEditing(cid, rid)) return editFormHtml(cid, rid, o.text);
+    if (isEditing(cid, rid)) return editFormHtml(cid, rid, o.text, tagOf(o));
     const key = targetKey(cid, rid);
     return '<div class="body">' + esc(o.text) + '</div>' +
       '<div class="card-actions">' +
@@ -501,11 +549,12 @@
   }
 
   /* 古い稿に付けたコメントは今のページでは文が書き換わっていることがある。
-     どの稿への指摘かを添え、飛んだ先が近傍になり得ることを伝える */
+     どの稿への指摘（質問）かを添え、飛んだ先が近傍になり得ることを伝える */
   function revNote(c) {
     const cur = session.revisions.length - 1;
     if (typeof c.revision !== 'number' || c.revision >= cur) return '';
-    return '<span class="rev-note">第' + (c.revision + 1) + '稿への指摘</span>';
+    return '<span class="rev-note">第' + (c.revision + 1) + '稿への' +
+      TAG_LABELS[tagOf(c)] + '</span>';
   }
 
   function renderComments() {
@@ -529,15 +578,18 @@
         revNote(c) +
         esc(c.target === 'image' ? '🖼 ' + (c.image || c.quote) : c.quote) +
         '</div>' +
-        authorLabel(c.author) +
+        // 編集中は選択欄が種類を示すので、保存済みの種類のバッジは出さない
+        (isEditing(c.id, null) ? '' : tagBadge(c)) + authorLabel(c.author) +
         '<span class="when">' + esc(fmtDate(c.created_at)) + '</span>' +
         editedMark(c) + bodyHtml(c.id, null, c) +
         replies + replyRowHtml(c.id) +
         '</div>';
     }).join('');
+    bindTagSelect(list);
     list.querySelectorAll('.comment-card').forEach((card) => {
       card.addEventListener('click', (e) => {
-        if (e.target.closest('input,button,textarea')) return;
+        // 種類の選択（label）を押してもページへは飛ばない
+        if (e.target.closest('input,button,textarea,label')) return;
         activateComment(card.dataset.cid, true);
       });
     });
@@ -588,14 +640,17 @@
     }
     const base = '/api/sessions/' + sid + '/comments/' + t.cid;
     const path = t.rid ? base + '/replies/' + t.rid + '/update' : base + '/update';
+    const body = { text: text };
+    if (!t.rid) body.tag = selectedTag('edit-tag');
     try {
-      const updated = await api(path, 'POST', { text: text });
+      const updated = await api(path, 'POST', body);
       const c = session.comments.find((x) => x.id === t.cid);
       if (c && t.rid) {
         const r = (c.replies || []).find((x) => x.id === t.rid);
         if (r) Object.assign(r, updated);
       } else if (c) {
-        Object.assign(c, updated);
+        // 指摘に戻すとサーバーは tag キーを消すので、合成せずに置き換える
+        session.comments[session.comments.indexOf(c)] = updated;
       }
       editing = null;
       renderComments();

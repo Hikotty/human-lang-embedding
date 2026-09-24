@@ -245,6 +245,42 @@ def test_comment_update_delete_error_codes(web_port):
     assert storage.load_session(s["id"])["comments"][0]["text"] == "指摘"
 
 
+def test_comment_tag_endpoints(web_port):
+    """質問タグはAPIで付けられ、更新で付け外しでき、フィードバックに現れる。"""
+    s = storage.create_session("t", "d", "")
+    base = f"/api/sessions/{s['id']}/comments"
+    status, c = _post(web_port, base, {
+        "id": "cq", "quote": "引用", "text": "これは何？", "tag": "question"})
+    assert status == 200 and c["tag"] == "question"
+    status, c = _post(web_port, base, {
+        "id": "ci", "quote": "引用", "text": "直して"})
+    assert status == 200 and "tag" not in c  # 既定は指摘
+    _, fb = _get(web_port, f"/api/sessions/{s['id']}/feedback")
+    assert [(x["id"], x["tag"]) for x in fb["comments"]] \
+        == [("cq", "question"), ("ci", "issue")]
+
+    # 更新で種類を変えられる。tag を送らない更新では変わらない
+    _, c = _post(web_port, f"{base}/cq/update", {"text": "直して", "tag": "issue"})
+    assert "tag" not in c
+    _, c = _post(web_port, f"{base}/ci/update",
+                 {"text": "これは何？", "tag": "question"})
+    assert c["tag"] == "question"
+    _, c = _post(web_port, f"{base}/ci/update", {"text": "本文だけ"})
+    assert c["tag"] == "question"
+
+
+def test_comment_tag_rejects_unknown_value(web_port):
+    s = storage.create_session("t", "d", "")
+    base = f"/api/sessions/{s['id']}/comments"
+    assert _status_of(lambda: _post(web_port, base, {
+        "id": "c1", "quote": "", "text": "x", "tag": "bogus"})) == 400
+    _post(web_port, base, {"id": "c2", "quote": "", "text": "x"})
+    assert _status_of(lambda: _post(
+        web_port, f"{base}/c2/update", {"text": "y", "tag": "bogus"})) == 400
+    comments = storage.load_session(s["id"])["comments"]
+    assert [(c["id"], c["text"]) for c in comments] == [("c2", "x")]
+
+
 def test_deleting_comment_renumbers_remaining(web_port):
     """削除するとC番号が繰り上がる。AIは get_feedback を取り直す必要がある。"""
     s = storage.create_session("t", "d", "")

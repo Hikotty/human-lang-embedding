@@ -247,6 +247,29 @@ COMMENT_TARGETS = ("text", "image")
 # 画像アンカー（HTMLレビュー用）。"img:2" のようにタグ名と出現順で指す。
 _IMAGE_REF_PATTERN = r"[A-Za-z][A-Za-z0-9-]{0,31}:\d{1,6}"
 
+# コメントの種類。issue（指摘）は本文を直してほしいもの、question（質問）は
+# 答えてほしいだけのもの。AIは tag を見て、修正稿に反映するか返信だけに
+# するかを分ける。既定は指摘で、tag を持たない旧データのコメントも指摘になる。
+COMMENT_TAGS = ("issue", "question")
+DEFAULT_COMMENT_TAG = "issue"
+
+
+def _check_tag(tag: str) -> str:
+    value = str(tag)
+    if value not in COMMENT_TAGS:
+        raise ValueError(
+            f"不正なコメントタグ: {tag!r} (対応: issue=指摘, question=質問)"
+        )
+    return value
+
+
+def _apply_tag(comment: dict[str, Any], tag: str) -> None:
+    """コメントに種類を付ける。既定（指摘）はキーを持たせず従来の形を保つ。"""
+    if tag == DEFAULT_COMMENT_TAG:
+        comment.pop("tag", None)
+    else:
+        comment["tag"] = tag
+
 
 def add_comment(
     session_id: str,
@@ -259,6 +282,7 @@ def add_comment(
     target: str = "text",
     image: str = "",
     image_ref: str = "",
+    tag: str = DEFAULT_COMMENT_TAG,
 ) -> dict[str, Any]:
     """コメントを追加する。comment_id はブラウザ側で採番したIDを受け入れる。
 
@@ -271,12 +295,15 @@ def add_comment(
     image は対象を表す名前（mdモードでは添付画像の保存ファイル名。URLに
     埋め込むためベース名へ正規化する）、image_ref はHTMLレビューで対象要素を
     「タグ名:出現順」で指すアンカーで、DOM検索に使うため書式を制限する。
+
+    tag はコメントの種類（"issue"=指摘・既定 / "question"=質問）。
     """
     if target not in COMMENT_TARGETS:
         raise ValueError(
             f"不正なコメント対象: {target!r} "
             f"(対応: {', '.join(COMMENT_TARGETS)})"
         )
+    tag = _check_tag(tag)
     name = Path(str(image)).name[:200]
     ref = str(image_ref)
     if ref and not re.fullmatch(_IMAGE_REF_PATTERN, ref):
@@ -309,6 +336,7 @@ def add_comment(
             comment["image"] = name
         if ref:
             comment["image_ref"] = ref
+        _apply_tag(comment, tag)
         s["comments"].append(comment)
         save_session(s)
         return comment
@@ -350,12 +378,19 @@ def _require_text(text: str, label: str) -> str:
     return value
 
 
-def update_comment(session_id: str, comment_id: str, text: str) -> dict[str, Any]:
-    """コメント本文を書き換える。"""
+def update_comment(
+    session_id: str, comment_id: str, text: str, tag: str | None = None
+) -> dict[str, Any]:
+    """コメント本文を書き換える。tag を渡すとコメントの種類も変える。"""
     with _LOCK:
         s = load_session(session_id)
         comment = find_comment(s, comment_id)
-        comment["text"] = _require_text(text, "コメント本文")
+        new_text = _require_text(text, "コメント本文")
+        # 不正な tag で本文だけ書き換わらないよう、変更の前に両方を検証する
+        new_tag = None if tag is None else _check_tag(tag)
+        comment["text"] = new_text
+        if new_tag is not None:
+            _apply_tag(comment, new_tag)
         comment["updated_at"] = _now()
         save_session(s)
         return comment

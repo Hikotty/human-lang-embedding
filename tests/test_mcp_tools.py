@@ -163,6 +163,47 @@ def test_tools_registered_on_mcp_server():
     }
 
 
+def _tool_descriptions() -> dict[str, str]:
+    """MCPクライアントに渡るツール説明を取り出す（別スレッドでループを回す）。"""
+    import asyncio
+    import threading
+
+    result: dict = {}
+
+    def worker():
+        result["tools"] = asyncio.run(server.server.list_tools())
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join(timeout=30)
+    return {x.name: x.description or "" for x in result["tools"]}
+
+
+def test_tool_descriptions_explain_question_tag():
+    """質問タグは回答だけで本文を変えないことが、ツール説明に明示されている。"""
+    d = _tool_descriptions()
+    fb = d["get_feedback"]
+    assert 'tag="issue"' in fb and 'tag="question"' in fb
+    assert "reply_comment" in fb
+    assert "本文を変えてはならない" in fb
+    assert 'tag="question"' in d["submit_revision"]
+    assert "本文には反映しない" in d["submit_revision"]
+    assert 'tag="question"' in d["reply_comment"]
+    # ツールを呼ぶ前から見える instructions にも同じ扱いを書いてある
+    assert 'tag="question"' in server.server.instructions
+
+
+def test_get_feedback_reports_comment_tags(write_md):
+    out = json.loads(server.open_review(write_md("初稿です。"), "種類"))
+    sid = out["session_id"]
+    storage.add_comment(sid, "初稿", "直して", comment_id="c1")
+    storage.add_comment(sid, "初稿", "なぜこの語？", comment_id="c2",
+                        tag="question")
+    fb = json.loads(server.get_feedback(sid))
+    assert [(c["id"], c["tag"]) for c in fb["comments"]] \
+        == [("c1", "issue"), ("c2", "question")]
+
+
 # ---------- 画像・差分保存 ----------
 
 def test_open_review_resolves_md_relative_image_ref(tmp_path, write_md):
