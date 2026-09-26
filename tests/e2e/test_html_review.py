@@ -15,6 +15,7 @@ from playwright.sync_api import expect
 from hle_mcp import storage
 
 from ..conftest import PNG_1PX
+from .conftest import real_click, real_drag
 
 PNG_DATA_URL = "data:image/png;base64," + base64.b64encode(PNG_1PX).decode()
 
@@ -337,47 +338,6 @@ def diagram_review(browser, web_port):
     )
     yield page, session["id"]
     context.close()
-
-
-def _mouse(cdp, kind: str, x: float, y: float, pressed: bool) -> None:
-    cdp.send("Input.dispatchMouseEvent", {
-        "type": kind, "x": x, "y": y, "clickCount": 1,
-        "button": "left" if pressed or kind != "mouseMoved" else "none",
-        "buttons": 1 if pressed else 0,
-    })
-
-
-def real_drag(page, x0: float, y0: float, x1: float, y1: float,
-              steps: int = 8) -> None:
-    """ブラウザの入力経路を通して、押す→動かす→離すのドラッグをする。
-
-    Playwright の page.mouse はボタンを押したまま動かすと、ドラッグの開始を
-    調べるために全フレームでスクリプトを評価する。スクリプトを許可しない
-    sandbox の iframe があるとその評価が返らず、move が固まる。そこで CDP の
-    Input.dispatchMouseEvent で入力を直接送る。ブラウザ側では実際のマウス
-    操作と同じに扱われ、文字の選択と click イベントが起きる。
-    """
-    cdp = page.context.new_cdp_session(page)
-    try:
-        _mouse(cdp, "mouseMoved", x0, y0, False)
-        _mouse(cdp, "mousePressed", x0, y0, True)
-        for i in range(1, steps + 1):
-            _mouse(cdp, "mouseMoved", x0 + (x1 - x0) * i / steps,
-                   y0 + (y1 - y0) * i / steps, True)
-        _mouse(cdp, "mouseReleased", x1, y1, False)
-    finally:
-        cdp.detach()
-
-
-def real_click(page, x: float, y: float) -> None:
-    """ブラウザの入力経路を通して、動かさずに押して離す。"""
-    cdp = page.context.new_cdp_session(page)
-    try:
-        _mouse(cdp, "mouseMoved", x, y, False)
-        _mouse(cdp, "mousePressed", x, y, True)
-        _mouse(cdp, "mouseReleased", x, y, False)
-    finally:
-        cdp.detach()
 
 
 def char_box(page, selector: str, start: int, end: int) -> dict:

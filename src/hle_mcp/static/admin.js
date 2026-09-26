@@ -69,7 +69,19 @@
       : '<span class="tag-badge issue">指摘</span>';
   }
 
-  function renderComments(comments) {
+  /* 範囲コメント（HTMLレビューでドラッグで囲んだ範囲）は、AIに渡した
+     スクリーンショットを添えて表示する */
+  function quoteHtml(c, sid) {
+    if (c.target !== 'region') return '「' + esc(c.quote) + '」';
+    const url = '/api/sessions/' + encodeURIComponent(sid) + '/files/' +
+      encodeURIComponent(c.image || '');
+    return '▭ 範囲「' + esc(c.quote || '文字なし') + '」' +
+      (c.image ? '<a href="' + esc(url) + '" target="_blank" rel="noopener">' +
+        '<img class="region-thumb" src="' + esc(url) +
+        '" alt="範囲のスクリーンショット"></a>' : '');
+  }
+
+  function renderComments(comments, sid) {
     if (!comments || !comments.length) {
       return '<div class="meta">コメントはありません</div>';
     }
@@ -84,8 +96,8 @@
         return '<div class="reply">' + rwho + esc(r.text) + '</div>';
       }).join('');
       return '<div class="admin-comment">' +
-        '<div><b>C' + (c.number || i + 1) + '</b> ' + tagBadge(c) + '「' +
-        esc(c.quote) + '」</div><div>' + who + esc(c.text) + '</div>' +
+        '<div><b>C' + (c.number || i + 1) + '</b> ' + tagBadge(c) +
+        quoteHtml(c, sid) + '</div><div>' + who + esc(c.text) + '</div>' +
         replies + '</div>';
     }).join('');
   }
@@ -122,7 +134,7 @@
           '稿）' + (fb.source_path ? '　' + esc(fb.source_path) : '') +
           '</div>' +
           '<h4>コメント (' + fb.comments.length + ')</h4>' +
-          renderComments(fb.comments);
+          renderComments(fb.comments, sid);
         return;
       }
       const past = renderRevisions(session);
@@ -134,7 +146,7 @@
         '<h4>校正反映後のテキスト</h4>' +
         '<div class="annotated">' + esc(fb.result_text) + '</div>' +
         '<h4>コメント (' + fb.comments.length + ')</h4>' +
-        renderComments(fb.comments);
+        renderComments(fb.comments, sid);
     } catch (e) {
       container.innerHTML =
         '<div class="meta">読み込みに失敗しました: ' + esc(e.message) + '</div>';

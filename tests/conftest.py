@@ -34,6 +34,23 @@ PNG_1PX = base64.b64decode(
 )
 
 
+def make_png(width: int, height: int, rgb: tuple[int, int, int] = (200, 30, 30)) -> bytes:
+    """指定した大きさの単色PNGを作る（範囲スクリーンショットの検証用）。"""
+    import struct
+    import zlib
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        body = kind + data
+        return (struct.pack(">I", len(data)) + body
+                + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF))
+
+    row = b"\x00" + bytes(rgb) * width
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(row * height))
+            + chunk(b"IEND", b""))
+
+
 @pytest.fixture()
 def png_file(tmp_path):
     """テスト用のPNGファイルを作成してパスを返す。"""

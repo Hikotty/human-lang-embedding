@@ -7,6 +7,7 @@ ID・タイトル・ワークスペースでの検索を提供する。
 from __future__ import annotations
 
 import json
+import math
 import re
 import threading
 import uuid
@@ -243,9 +244,126 @@ def add_revision(
         return s
 
 
-COMMENT_TARGETS = ("text", "image")
+# text: 文字列への、image: 画像・図そのものへの、region: 人間がページ上を
+# ドラッグで囲んだ範囲（HTMLレビューのみ）へのコメント
+COMMENT_TARGETS = ("text", "image", "region")
 # 画像アンカー（HTMLレビュー用）。"img:2" のようにタグ名と出現順で指す。
 _IMAGE_REF_PATTERN = r"[A-Za-z][A-Za-z0-9-]{0,31}:\d{1,6}"
+
+# 範囲コメントのスクリーンショット。AIが画像として読むので長辺と容量に
+# 上限を設ける。長辺は Claude が1回に20枚を超える画像を受けると下げる
+# 2000px を下回るように、容量は Bedrock の1枚 3.75MB を下回るようにする
+# （大きすぎる画像はエージェントの画像読み込みを止めることもある）
+REGION_SHOT_MAX_EDGE = 1600
+REGION_SHOT_MAX_BYTES = 3 * 1024 * 1024
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+# 範囲内に表示されていた文字列（ソースを探す手がかり）の上限。超えた分は捨てる
+REGION_TEXTS_MAX = 80
+REGION_TEXTS_MAX_CHARS = 4000
+_REGION_NUM_LIMIT = 1_000_000.0
+
+
+def png_size(data: bytes) -> tuple[int, int]:
+    """PNGの幅と高さを返す（PNGでなければ ValueError）。"""
+    if len(data) < 24 or data[:8] != _PNG_SIGNATURE or data[12:16] != b"IHDR":
+        raise ValueError("スクリーンショットはPNG画像にしてください")
+    width = int.from_bytes(data[16:20], "big")
+    height = int.from_bytes(data[20:24], "big")
+    if width <= 0 or height <= 0:
+        raise ValueError("スクリーンショットの大きさが不正です")
+    return width, height
+
+
+def check_region_screenshot(data: bytes) -> tuple[int, int]:
+    """範囲コメントのスクリーンショットを検証し、(幅, 高さ) を返す。"""
+    if not data:
+        raise ValueError("スクリーンショットが空です")
+    if len(data) > REGION_SHOT_MAX_BYTES:
+        raise ValueError(
+            "スクリーンショットは"
+            f"{REGION_SHOT_MAX_BYTES / (1024 * 1024):g}MB以下にしてください"
+        )
+    width, height = png_size(data)
+    if max(width, height) > REGION_SHOT_MAX_EDGE:
+        raise ValueError(
+            f"スクリーンショットの長辺は{REGION_SHOT_MAX_EDGE}px以下にして"
+            f"ください（{width}x{height}）"
+        )
+    return width, height
+
+
+def _region_num(value: Any, label: str, lo: float = -_REGION_NUM_LIMIT,
+                hi: float = _REGION_NUM_LIMIT) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"範囲の {label} には数値を指定してください")
+    num = float(value)
+    if not math.isfinite(num) or not lo <= num <= hi:
+        raise ValueError(f"範囲の {label} が不正です: {value!r}")
+    return round(num, 4)
+
+
+def _region_box(value: Any, label: str, lo: float = -_REGION_NUM_LIMIT,
+                hi: float = _REGION_NUM_LIMIT) -> list[float]:
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        raise ValueError(f"範囲の {label} は4つの数値 [x, y, 幅, 高さ] にしてください")
+    return [_region_num(v, label, lo, hi) for v in value]
+
+
+def _check_region(region: Any) -> dict[str, Any]:
+    """範囲コメントの位置を検証して、保存する形に整える。
+
+    x / y / width / height は表示中の文書での位置（CSS px、スクロール込み）、
+    frame_width / frame_height はそのときの表示領域の大きさ。ref があれば
+    範囲を含む図（"svg:0" のようにタグ名と出現順）で、rel はその図の枠に
+    対する割合 [x, y, 幅, 高さ]、svg_box はその SVG の座標系（viewBox）での
+    範囲。ref と rel は、画面の幅が変わって図が伸び縮みしても枠を図に
+    追従させるために使う。
+    """
+    if not isinstance(region, dict):
+        raise ValueError("範囲コメントには region（位置）が必要です")
+    out: dict[str, Any] = {
+        "x": _region_num(region.get("x"), "x", 0),
+        "y": _region_num(region.get("y"), "y", 0),
+        "width": _region_num(region.get("width"), "width", 0),
+        "height": _region_num(region.get("height"), "height", 0),
+    }
+    if out["width"] <= 0 or out["height"] <= 0:
+        raise ValueError("範囲の幅と高さは正の数にしてください")
+    for key in ("frame_width", "frame_height"):
+        if region.get(key) is not None:
+            out[key] = _region_num(region[key], key, 0)
+    ref = region.get("ref")
+    if ref:
+        ref = str(ref)
+        if not re.fullmatch(_IMAGE_REF_PATTERN, ref):
+            raise ValueError(f"不正な図のアンカー: {ref!r}")
+        out["ref"] = ref
+        if region.get("rel") is not None:
+            out["rel"] = _region_box(region["rel"], "rel", -1.0, 2.0)
+        if region.get("svg_box") is not None:
+            out["svg_box"] = _region_box(region["svg_box"], "svg_box")
+    return out
+
+
+def _check_texts(texts: Any) -> list[str]:
+    """範囲内に表示されていた文字列の配列を整える（上限を超えた分は捨てる）。"""
+    if texts is None:
+        return []
+    if not isinstance(texts, (list, tuple)):
+        raise ValueError("texts は文字列の配列にしてください")
+    out: list[str] = []
+    total = 0
+    for t in texts:
+        if not isinstance(t, str):
+            raise ValueError("texts は文字列の配列にしてください")
+        s = t.strip()
+        if not s:
+            continue
+        if len(out) >= REGION_TEXTS_MAX or total + len(s) > REGION_TEXTS_MAX_CHARS:
+            break
+        out.append(s)
+        total += len(s)
+    return out
 
 # コメントの種類。issue（指摘）は本文を直してほしいもの、question（質問）は
 # 答えてほしいだけのもの。AIは tag を見て、修正稿に反映するか返信だけに
@@ -283,6 +401,8 @@ def add_comment(
     image: str = "",
     image_ref: str = "",
     tag: str = DEFAULT_COMMENT_TAG,
+    region: Any = None,
+    texts: Any = None,
 ) -> dict[str, Any]:
     """コメントを追加する。comment_id はブラウザ側で採番したIDを受け入れる。
 
@@ -295,6 +415,11 @@ def add_comment(
     image は対象を表す名前（mdモードでは添付画像の保存ファイル名。URLに
     埋め込むためベース名へ正規化する）、image_ref はHTMLレビューで対象要素を
     「タグ名:出現順」で指すアンカーで、DOM検索に使うため書式を制限する。
+
+    target="region" はHTMLレビューで人間がドラッグで囲んだ範囲へのコメント。
+    image はセッションに保存済みの、その範囲のスクリーンショット（PNG）の
+    ファイル名、region は位置（_check_region）、texts は範囲内に表示されて
+    いた文字列。通常は add_region_comment で画像と一緒に保存する。
 
     tag はコメントの種類（"issue"=指摘・既定 / "question"=質問）。
     """
@@ -310,8 +435,20 @@ def add_comment(
         raise ValueError(f"不正な画像アンカー: {image_ref!r}")
     if target == "image" and not (name or ref):
         raise ValueError("画像コメントには image か image_ref が必要です")
+    region_data: dict[str, Any] | None = None
+    texts_data: list[str] = []
+    if target == "region":
+        region_data = _check_region(region)
+        texts_data = _check_texts(texts)
+        if not name:
+            raise ValueError("範囲コメントにはスクリーンショット（image）が必要です")
     with _LOCK:
         s = load_session(session_id)
+        shot_size: tuple[int, int] | None = None
+        if region_data is not None:
+            if session_mode(s) != "html":
+                raise ValueError("範囲コメントはHTMLレビューでのみ使えます")
+            shot_size = _stored_screenshot_size(session_id, name)
         cid = comment_id or _new_id("c")
         if not re.fullmatch(_ID_PATTERN, cid):
             raise ValueError(f"不正なコメントID: {cid!r}")
@@ -336,10 +473,86 @@ def add_comment(
             comment["image"] = name
         if ref:
             comment["image_ref"] = ref
+        if region_data is not None and shot_size is not None:
+            comment["region"] = region_data
+            comment["texts"] = texts_data
+            comment["screenshot_size"] = list(shot_size)
+            if not comment["quote"]:
+                comment["quote"] = region_label(texts_data)
         _apply_tag(comment, tag)
         s["comments"].append(comment)
         save_session(s)
         return comment
+
+
+def region_label(texts: list[str], limit: int = 120) -> str:
+    """範囲コメントの見出し（範囲内の文字列をつないだもの）を作る。"""
+    label = " / ".join(texts)
+    return label if len(label) <= limit else label[: limit - 1] + "…"
+
+
+def _stored_screenshot_size(session_id: str, name: str) -> tuple[int, int]:
+    """保存済みのスクリーンショットを検証し、(幅, 高さ) を返す。"""
+    try:
+        path = get_image_path(session_id, name)
+    except KeyError:
+        raise ValueError(f"スクリーンショットが見つかりません: {name}") from None
+    if path.stat().st_size > REGION_SHOT_MAX_BYTES:
+        raise ValueError("スクリーンショットが大きすぎます")
+    with open(path, "rb") as fh:
+        width, height = png_size(fh.read(24))
+    if max(width, height) > REGION_SHOT_MAX_EDGE:
+        raise ValueError(
+            f"スクリーンショットの長辺は{REGION_SHOT_MAX_EDGE}px以下にしてください"
+        )
+    return width, height
+
+
+def add_region_comment(
+    session_id: str,
+    screenshot: bytes,
+    text: str,
+    region: Any,
+    texts: Any = None,
+    quote: str = "",
+    author: str = "human",
+    comment_id: str | None = None,
+    tag: str = DEFAULT_COMMENT_TAG,
+) -> dict[str, Any]:
+    """範囲コメントを、その範囲のスクリーンショット（PNG）と一緒に保存する。
+
+    画像をセッションの添付として保存してからコメントを追加する。
+    コメントの検証で失敗したら保存した画像を消し、片方だけが残らないようにする。
+    """
+    check_region_screenshot(screenshot)
+    _check_region(region)  # 画像を書く前に検証する（add_comment でも検証する）
+    _check_texts(texts)
+    cid = comment_id or _new_id("c")
+    if not re.fullmatch(_ID_PATTERN, str(cid)):
+        raise ValueError(f"不正なコメントID: {cid!r}")
+    with _LOCK:
+        if session_mode(load_session(session_id)) != "html":
+            raise ValueError("範囲コメントはHTMLレビューでのみ使えます")
+        name = save_image_bytes(session_id, f"region-{cid}.png", screenshot)
+        try:
+            return add_comment(
+                session_id, quote=quote, text=text, author=author,
+                comment_id=cid, target="region", image=name, tag=tag,
+                region=region, texts=texts,
+            )
+        except Exception:
+            (files_dir(session_id) / name).unlink(missing_ok=True)
+            raise
+
+
+def region_screenshot_path(session_id: str, name: str) -> Path | None:
+    """範囲コメントのスクリーンショットの絶対パス（無ければ None）。"""
+    if not name:
+        return None
+    try:
+        return get_image_path(session_id, name).resolve()
+    except KeyError:
+        return None
 
 
 def find_comment(session: dict[str, Any], comment_id: str) -> dict[str, Any]:
@@ -402,12 +615,20 @@ def delete_comment(session_id: str, comment_id: str) -> dict[str, Any]:
     本文中の <span class="cmt" data-cid> はブラウザ側で外す。残っていても
     annotated_text には現れない（番号が引けないため）が、ハイライトだけが
     残った孤児spanになるので、エディタは削除と同時に編集HTMLを保存し直す。
+
+    範囲コメントのスクリーンショットはそのコメントのためだけに撮ったもの
+    なので、ほかのコメントが参照していなければ一緒に消す。
     """
     with _LOCK:
         s = load_session(session_id)
-        find_comment(s, comment_id)  # 存在しなければ KeyError
+        comment = find_comment(s, comment_id)  # 存在しなければ KeyError
         s["comments"] = [c for c in s["comments"] if c["id"] != comment_id]
         save_session(s)
+        shot = comment.get("image", "") if comment.get("target") == "region" else ""
+        if shot and not any(c.get("image") == shot for c in s["comments"]):
+            path = region_screenshot_path(session_id, shot)
+            if path is not None:
+                path.unlink(missing_ok=True)
         return s
 
 

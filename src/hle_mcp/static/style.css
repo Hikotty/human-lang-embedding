@@ -445,6 +445,11 @@ html, body {
 .admin-comment .who { font-weight: 700; margin-right: 6px; }
 .admin-comment .who.ai { color: #1967d2; }
 .admin-comment .reply { margin: 4px 0 0 14px; }
+/* 範囲コメントのスクリーンショット（AIに渡した画像） */
+.admin-comment img.region-thumb {
+  display: block; max-width: 320px; max-height: 180px; margin: 4px 0;
+  border: 1px solid #dadce0; border-radius: 4px; background: #fff;
+}
 .rev-block { margin-bottom: 8px; }
 .rev-block .rev-title { font-weight: 700; font-size: 12px; margin-bottom: 2px; }
 .empty-admin { text-align: center; color: #9aa0a6; margin-top: 40px; }

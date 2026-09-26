@@ -76,6 +76,9 @@
   let anchors = new Map();    // cid -> Range（現在のiframe DOM上の位置）
   let objAnchors = new Map(); // cid -> 画像・図の要素（画像コメント）
   let selectedObj = null;     // クリックで選んだ画像・図
+  let regionMode = false;     // 範囲指定モード（ドラッグで範囲を囲む）
+  let drawing = null;         // 囲んでいる途中の矩形 { x0, y0, x1, y1 }
+  let pendingRect = null;     // 囲み終えてスクリーンショットを作っている範囲
 
   const frame = () => $('#doc-frame');
   const frameDoc = () => frame().contentDocument;
@@ -95,10 +98,19 @@
     frame().addEventListener('load', onFrameLoad);
     frame().src = '/api/sessions/' + sid + '/source';
     $('#btn-comment').addEventListener('click', startCommentDraft);
+    $('#btn-region').addEventListener('click', () => setRegionMode(!regionMode));
     $('#btn-complete').addEventListener('click', completeReview);
     $('#draft-submit').addEventListener('click', submitDraft);
     $('#draft-cancel').addEventListener('click', cancelDraft);
     $('#btn-update-reload').addEventListener('click', reloadForUpdate);
+    const lay = layer();
+    lay.addEventListener('pointerdown', onLayerDown);
+    lay.addEventListener('pointermove', onLayerMove);
+    lay.addEventListener('pointerup', onLayerUp);
+    lay.addEventListener('pointercancel', onLayerCancel);
+    lay.addEventListener('wheel', onLayerWheel, { passive: false });
+    document.addEventListener('keydown', onKeyDown);
+    window.addEventListener('resize', schedulePaintRegions);
     setInterval(pollRemote, 2500);
   }
 
@@ -135,9 +147,23 @@
       'outline-offset:2px;cursor:pointer;}' +
       '[data-hle-obj="active"],[data-hle-obj="draft"]{outline-color:#f57c00;}' +
       '[data-hle-obj="sel"]{outline-color:#1a73e8;}';
+    // 範囲のスクリーンショットを作るときに、この印の付いた要素は外す
+    style.setAttribute('data-hle-style', '');
     (doc.head || doc.body).appendChild(style);
     doc.addEventListener('selectionchange', captureSelection);
     doc.addEventListener('click', onFrameClick);
+    doc.addEventListener('keydown', onKeyDown);
+    // 範囲の枠は親ページ側の層に描くので、iframe のスクロールと、スクロールを
+    // 伴わない再レイアウト（<details> の開閉、遅れて読み込まれた画像など）に
+    // 合わせて動かす
+    frameWin().addEventListener('scroll', schedulePaintRegions, { passive: true });
+    doc.addEventListener('toggle', schedulePaintRegions, true);
+    doc.addEventListener('load', schedulePaintRegions, true);
+    if (window.ResizeObserver) {
+      const ro = new ResizeObserver(schedulePaintRegions);
+      ro.observe(doc.documentElement);
+      ro.observe(doc.body);
+    }
     applyHighlights();
   }
 
@@ -257,6 +283,9 @@
     if (!doc || !doc.body) return;
     const idx = textIndex();
     session.comments.forEach((c) => {
+      // 範囲コメントの quote は範囲内の文字列をつないだ見出しなので、
+      // 本文から探さない（位置は region で持つ）
+      if (c.target === 'region') return;
       if (c.target === 'image') {
         const el = elemFromRef(c.image_ref);
         if (el) objAnchors.set(c.id, el);
@@ -290,6 +319,7 @@
 
   function paintHighlights() {
     paintObjects();
+    paintRegions();
     const win = frameWin();
     if (!win || !win.CSS || !win.CSS.highlights || !win.Highlight) return;
     const normal = [];
@@ -426,6 +456,11 @@
   }
 
   function startCommentDraft() {
+    if (regionMode) {
+      toast('範囲指定モードです。ページ上をドラッグして範囲を囲むと、' +
+        'コメント欄が開きます');
+      return;
+    }
     if (selectedObj && selectedObj.isConnected) {
       const ref = elemRef(selectedObj);
       if (!ref) {
@@ -450,14 +485,30 @@
     showDraft(draft.quote);
   }
 
-  function showDraft(label) {
+  /* 下書き欄を開く。shotUrl を渡すと、AIに渡るスクリーンショットを添えて
+     見せる。keepInput なら、開いている下書きの本文と種類を残したまま対象
+     だけを差し替える（範囲を囲み直したとき、書いた文を消さないため） */
+  function showDraft(label, shotUrl, keepInput) {
     paintHighlights();
-    $('#comment-draft').hidden = false;
-    $('#draft-quote').textContent = label;
-    // 種類は毎回「指摘」から始める（前の下書きの選択を持ち越さない）
-    $('#draft-tag').innerHTML = tagSelectHtml('draft-tag', 'issue');
-    bindTagSelect($('#draft-tag'));
-    $('#draft-text').value = '';
+    const box = $('#comment-draft');
+    const reuse = !!keepInput && !box.hidden;
+    box.hidden = false;
+    const q = $('#draft-quote');
+    q.textContent = '';
+    q.classList.toggle('shot-quote', !!shotUrl);
+    if (shotUrl) {
+      const img = document.createElement('img');
+      img.src = shotUrl;
+      img.alt = '囲んだ範囲のスクリーンショット（AIに渡る画像）';
+      q.appendChild(img);
+    }
+    q.appendChild(document.createTextNode(label));
+    if (!reuse) {
+      // 種類は毎回「指摘」から始める（前の下書きの選択を持ち越さない）
+      $('#draft-tag').innerHTML = tagSelectHtml('draft-tag', 'issue');
+      bindTagSelect($('#draft-tag'));
+      $('#draft-text').value = '';
+    }
     $('#draft-text').focus();
   }
 
@@ -471,6 +522,11 @@
     if (draft.target === 'image') {
       body.image = draft.image;
       body.image_ref = draft.image_ref;
+    } else if (draft.target === 'region') {
+      // スクリーンショットはコメントと一緒に送り、サーバーが揃えて保存する
+      body.region = draft.region;
+      body.texts = draft.texts;
+      body.screenshot = draft.shot.slice(draft.shot.indexOf(',') + 1);
     } else {
       body.prefix = draft.prefix;
       body.suffix = draft.suffix;
@@ -606,6 +662,22 @@
       TAG_LABELS[tagOf(c)] + '</span>';
   }
 
+  /* カード先頭の引用。範囲コメントは、AIに渡したスクリーンショットの
+     縮小を添えて、どこを囲んだかを見分けられるようにする */
+  function cardQuoteHtml(c, n) {
+    if (c.target === 'region') {
+      const url = '/api/sessions/' + encodeURIComponent(sid) + '/files/' +
+        encodeURIComponent(c.image || '');
+      return '<div class="quote img-quote" title="クリックでページの位置へ">' +
+        '<img src="' + esc(url) + '" alt=""><span>C' + n + ': ▭ ' +
+        esc(c.quote || '範囲（文字なし）') + '</span>' + revNote(c) + '</div>';
+    }
+    return '<div class="quote" title="クリックでページの位置へ">C' + n + ': ' +
+      revNote(c) +
+      esc(c.target === 'image' ? '🖼 ' + (c.image || c.quote) : c.quote) +
+      '</div>';
+  }
+
   function renderComments() {
     const list = $('#comment-list');
     if (!session.comments.length) {
@@ -623,10 +695,7 @@
       return '<div class="comment-card' +
         (c.id === activeCid ? ' active' : '') +
         '" data-cid="' + esc(c.id) + '">' +
-        '<div class="quote" title="クリックでページの位置へ">C' + (i + 1) + ': ' +
-        revNote(c) +
-        esc(c.target === 'image' ? '🖼 ' + (c.image || c.quote) : c.quote) +
-        '</div>' +
+        cardQuoteHtml(c, i + 1) +
         // 編集中は選択欄が種類を示すので、保存済みの種類のバッジは出さない
         (isEditing(c.id, null) ? '' : tagBadge(c)) + authorLabel(c.author) +
         '<span class="when">' + esc(fmtDate(c.created_at)) + '</span>' +
@@ -773,6 +842,11 @@
      解決できなくなったコメントは、引用文の先頭・末尾の一部で探して
      近傍へ飛び、見つけた範囲を一時的に強調する */
   function jumpToComment(cid) {
+    const rc = session.comments.find((x) => x.id === cid);
+    if (rc && rc.target === 'region') {
+      scrollToRegion(rc.region);
+      return;
+    }
     const el = objAnchors.get(cid) ||
       (anchors.has(cid) ? rangeElement(anchors.get(cid)) : null);
     if (el && el.scrollIntoView) {
@@ -823,6 +897,562 @@
     el.hidden = false;
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => { el.hidden = true; }, 2500);
+  }
+
+  /* ---------- 範囲指定モード ----------
+     ページの上に透明の層を重ね、ドラッグで囲んだ矩形にコメントを付ける。
+     囲んだ範囲はその場でスクリーンショットにしてコメントと一緒に保存し、
+     AIは get_feedback でその画像を受け取る。層は親ページ側に置くので、
+     レビュー対象のDOMには手を加えない */
+  const SHOT_SCALE = 2;          // 切り抜きの解像度（CSS px に対する倍率）
+  const SHOT_MAX_EDGE = 1600;    // 切り抜きの長辺の上限（サーバーと同じ）
+  const SHOT_MAX_BYTES = 3 * 1024 * 1024;  // 1枚の上限（サーバーと同じ）
+  const REGION_MIN = 8;          // これより小さい囲みはクリックとして扱う
+  const TEXTS_MAX = 80;          // 範囲内の文字列の断片の上限（サーバーと同じ）
+  const TEXTS_MAX_CHARS = 4000;
+
+  const layer = () => $('#region-layer');
+
+  function setRegionMode(on) {
+    regionMode = !!on;
+    drawing = null;
+    const btn = $('#btn-region');
+    btn.classList.toggle('on', regionMode);
+    btn.setAttribute('aria-pressed', regionMode ? 'true' : 'false');
+    layer().classList.toggle('drawing', regionMode);
+    if (regionMode) {
+      // 囲んでいる間は文字列・画像の選択を外す（コメントの対象を1つに保つ）
+      selectedObj = null;
+      lastSel = null;
+      const win = frameWin();
+      if (win && win.getSelection) win.getSelection().removeAllRanges();
+      toast('ページ上をドラッグして、コメントを付けたい範囲を囲んでください');
+    }
+    paintHighlights();
+  }
+
+  function normRect(d) {
+    return {
+      x: Math.min(d.x0, d.x1), y: Math.min(d.y0, d.y1),
+      w: Math.abs(d.x1 - d.x0), h: Math.abs(d.y1 - d.y0),
+    };
+  }
+
+  /* ポインターの位置を層（＝iframe の表示領域）の座標にして、はみ出しは詰める */
+  function layerPoint(e) {
+    const b = layer().getBoundingClientRect();
+    return {
+      x: Math.max(0, Math.min(b.width, e.clientX - b.left)),
+      y: Math.max(0, Math.min(b.height, e.clientY - b.top)),
+    };
+  }
+
+  function onLayerDown(e) {
+    if (!regionMode || e.button !== 0 || pendingRect) return;
+    e.preventDefault();
+    const p = layerPoint(e);
+    drawing = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
+    try { layer().setPointerCapture(e.pointerId); } catch (err) { /* 無視 */ }
+    paintRegions();
+  }
+
+  function onLayerMove(e) {
+    if (!drawing) return;
+    const p = layerPoint(e);
+    drawing.x1 = p.x;
+    drawing.y1 = p.y;
+    paintRegions();
+  }
+
+  function onLayerUp(e) {
+    if (!drawing) return;
+    onLayerMove(e);
+    const r = normRect(drawing);
+    drawing = null;
+    try { layer().releasePointerCapture(e.pointerId); } catch (err) { /* 無視 */ }
+    if (r.w < REGION_MIN || r.h < REGION_MIN) {
+      // 囲まずにクリックしただけなら、そこにある範囲コメントを開く
+      paintRegions();
+      const cid = regionAt(r.x, r.y);
+      if (cid) activateComment(cid, false);
+      return;
+    }
+    createRegionDraft(r);
+  }
+
+  function onLayerCancel() {
+    drawing = null;
+    paintRegions();
+  }
+
+  /* 層がホイールを受け取るので、iframe のスクロールに渡す。ページの
+     スクロールだけを送る（要素の内側のスクロールは範囲指定の間は送れない）。
+     ctrl 付き（トラックパッドのピンチ）はブラウザの拡大に任せる */
+  function onLayerWheel(e) {
+    const win = frameWin();
+    if (!win || e.ctrlKey) return;
+    e.preventDefault();
+    const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? win.innerHeight : 1;
+    win.scrollBy(e.deltaX * unit, e.deltaY * unit);
+  }
+
+  /* Esc で囲みかけの矩形を取り消し、囲んでいなければ範囲指定モードを抜ける。
+     囲み直している間もフォーカスは下書き欄に残るので、囲みかけの取り消しは
+     入力欄での Esc でも効かせる */
+  function onKeyDown(e) {
+    if (e.key !== 'Escape' || !regionMode) return;
+    if (drawing) {
+      drawing = null;
+      paintRegions();
+      return;
+    }
+    const t = e.target;
+    if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT')) return;
+    setRegionMode(false);
+  }
+
+  /* 保存した範囲を、今の iframe の表示領域の座標に直す。範囲を含む図が
+     分かっていれば図の枠に対する割合で置き、画面の幅が変わって図が
+     伸び縮みしても枠が図に付いていくようにする */
+  function regionClientRect(region) {
+    if (!region) return null;
+    const rel = region.rel;
+    if (region.ref && Array.isArray(rel) && rel.length === 4) {
+      const el = elemFromRef(region.ref);
+      const b = el && el.getBoundingClientRect();
+      if (b && b.width > 0 && b.height > 0) {
+        return {
+          x: b.left + rel[0] * b.width, y: b.top + rel[1] * b.height,
+          w: rel[2] * b.width, h: rel[3] * b.height,
+        };
+      }
+    }
+    const win = frameWin();
+    if (!win) return null;
+    return {
+      x: region.x - win.scrollX, y: region.y - win.scrollY,
+      w: region.width, h: region.height,
+    };
+  }
+
+  /* 範囲の9割以上を覆う画像・図のうち、いちばん小さいものを返す */
+  function figureFor(r) {
+    const doc = frameDoc();
+    let best = null;
+    let bestArea = Infinity;
+    doc.querySelectorAll(OBJ_SELECTOR).forEach((el) => {
+      const b = el.getBoundingClientRect();
+      const iw = Math.min(r.x + r.w, b.right) - Math.max(r.x, b.left);
+      const ih = Math.min(r.y + r.h, b.bottom) - Math.max(r.y, b.top);
+      if (iw <= 0 || ih <= 0) return;
+      const area = b.width * b.height;
+      if ((iw * ih) / (r.w * r.h) >= 0.9 && area < bestArea) {
+        best = el;
+        bestArea = area;
+      }
+    });
+    return best;
+  }
+
+  /* SVG の座標系（viewBox）での範囲。AIが図の要素の座標と突き合わせられる */
+  function svgBox(el, r) {
+    if (el.tagName.toLowerCase() !== 'svg' || !el.getScreenCTM) return null;
+    const m = el.getScreenCTM();
+    if (!m) return null;
+    const inv = m.inverse();
+    const P = frameWin().DOMPoint;
+    const a = new P(r.x, r.y).matrixTransform(inv);
+    const b = new P(r.x + r.w, r.y + r.h).matrixTransform(inv);
+    const round = (v) => Math.round(v * 10) / 10;
+    return [round(Math.min(a.x, b.x)), round(Math.min(a.y, b.y)),
+      round(Math.abs(b.x - a.x)), round(Math.abs(b.y - a.y))];
+  }
+
+  /* 囲んだ矩形（表示領域の座標）から、保存する位置の情報を作る */
+  function buildRegion(r) {
+    const win = frameWin();
+    const root = frameDoc().documentElement;
+    const round = (v) => Math.round(v * 10) / 10;
+    const region = {
+      x: round(r.x + win.scrollX), y: round(r.y + win.scrollY),
+      width: round(r.w), height: round(r.h),
+      frame_width: root.clientWidth, frame_height: root.clientHeight,
+    };
+    const fig = figureFor(r);
+    const ref = fig ? elemRef(fig) : '';
+    const b = fig && fig.getBoundingClientRect();
+    if (ref && b.width > 0 && b.height > 0) {
+      const frac = (v) => Math.round(v * 10000) / 10000;
+      region.ref = ref;
+      region.rel = [frac((r.x - b.left) / b.width), frac((r.y - b.top) / b.height),
+        frac(r.w / b.width), frac(r.h / b.height)];
+      const box = svgBox(fig, r);
+      if (box) region.svg_box = box;
+    }
+    return region;
+  }
+
+  /* 範囲内に表示されている文字列を、文書の順に断片で集める。文字の中心が
+     範囲に入っているものだけを数え、はみ出したノードは1文字ずつ調べる。
+     長い <pre> の後半を囲んでも拾えるよう、1ノードあたり2万文字まで見る */
+  const TEXT_SCAN_MAX = 20000;
+  function regionTexts(r) {
+    const doc = frameDoc();
+    const inside = (b) => (b.width > 0 || b.height > 0) &&
+      b.left + b.width / 2 >= r.x && b.left + b.width / 2 <= r.x + r.w &&
+      b.top + b.height / 2 >= r.y && b.top + b.height / 2 <= r.y + r.h;
+    const skip = /^(script|style|title|desc|noscript|template)$/i;
+    const out = [];
+    let total = 0;
+    const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+    const range = doc.createRange();
+    let n;
+    while ((n = walker.nextNode())) {
+      const p = n.parentElement;
+      if (!p || skip.test(p.tagName) || !n.data.trim()) continue;
+      range.selectNodeContents(n);
+      const nb = range.getBoundingClientRect();
+      if ((nb.width <= 0 && nb.height <= 0) || nb.right < r.x ||
+          nb.left > r.x + r.w || nb.bottom < r.y || nb.top > r.y + r.h) continue;
+      let s = '';
+      if (nb.left >= r.x && nb.right <= r.x + r.w &&
+          nb.top >= r.y && nb.bottom <= r.y + r.h) {
+        s = n.data;
+      } else {
+        let gap = false;
+        for (let i = 0; i < Math.min(n.data.length, TEXT_SCAN_MAX); i++) {
+          range.setStart(n, i);
+          range.setEnd(n, i + 1);
+          if (inside(range.getBoundingClientRect())) {
+            s += (gap && s ? ' ' : '') + n.data[i];
+            gap = false;
+          } else if (s) {
+            gap = true;
+          }
+        }
+      }
+      s = s.replace(/\s+/g, ' ').trim();
+      if (!s) continue;
+      if (out.length >= TEXTS_MAX || total + s.length > TEXTS_MAX_CHARS) break;
+      out.push(s);
+      total += s.length;
+    }
+    return out;
+  }
+
+  function regionLabel(texts) {
+    const label = texts.join(' / ');
+    return label.length <= 120 ? label : label.slice(0, 119) + '…';
+  }
+
+  function base64Utf8(str) {
+    const bytes = new TextEncoder().encode(str);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    }
+    return btoa(bin);
+  }
+
+  /* 表示中の背景色。body（または html）の背景は本来ページ全体に広がるが、
+     複製を画像にするとその要素の箱の中にしか塗られないので、先に塗っておく */
+  function pageBackground(doc, win) {
+    const clear = (c) => !c || c === 'transparent' || /rgba\(.*,\s*0\)$/.test(c);
+    let bg = win.getComputedStyle(doc.documentElement).backgroundColor;
+    if (clear(bg) && doc.body) bg = win.getComputedStyle(doc.body).backgroundColor;
+    return clear(bg) ? '#ffffff' : bg;
+  }
+
+  /* 複製を XML として読み直せるようにする。HTML では許されても XML では
+     不正な属性名（@click, :class, x-on:click など。名前空間の付いた
+     xlink:href などは残る）と、XML に書けない文字を外す。コメントは
+     描画に関係せず、中の "--" が XML では不正なので消す */
+  const XML_NAME = /^[A-Za-z_\u00C0-\uFFEF][A-Za-z0-9._\-\u00B7\u00C0-\uFFEF]*$/;
+  // XML に書けない制御文字と、対になっていないサロゲート（低サロゲートは
+  // 直前の1文字を残すために捕まえる）
+  const XML_BAD = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+  // 制御文字は Chrome が見える記号として描くので、同じ意味の記号
+  // （U+2400 台の Control Pictures）に置き換える。幅は表示と少し違うことがある
+  const xmlText = (s) => s.replace(XML_BAD, (m, lead) => {
+    if (lead !== undefined) return lead;  // 対になっていない低サロゲート
+    const code = m.charCodeAt(0);
+    return code < 0x20 ? String.fromCharCode(0x2400 + code) : '';
+  });
+  function makeXmlSafe(clone) {
+    [clone].concat(Array.from(clone.getElementsByTagName('*'))).forEach((el) => {
+      Array.from(el.attributes).forEach((a) => {
+        // HTML の要素に書かれた xmlns は名前空間の宣言にならず、直列化で
+        // 宣言と二重になるので外す（描画には関係しない）
+        if (a.namespaceURI === null &&
+            (!XML_NAME.test(a.name) || a.name === 'xmlns')) {
+          el.removeAttribute(a.name);
+        } else if (xmlText(a.value) !== a.value) {
+          a.value = xmlText(a.value);
+        }
+      });
+    });
+    const walker = clone.ownerDocument.createTreeWalker(
+      clone, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_COMMENT);
+    const comments = [];
+    let n;
+    while ((n = walker.nextNode())) {
+      if (n.nodeType === Node.COMMENT_NODE) comments.push(n);
+      else if (xmlText(n.data) !== n.data) n.data = xmlText(n.data);
+    }
+    comments.forEach((c) => c.remove());
+  }
+
+  /* 表示領域に対して置かれる要素（fixed）と、スクロールで貼り付く要素
+     （sticky）は、複製がスクロールしていないので、そのままだと画面と違う
+     所に写る。複製の側で、今の見た目の位置に置き直す。複製と表示中の文書は
+     同じ構造なので、要素を文書の順に突き合わせる（複製から要素を外す前に呼ぶ）。
+     入れ子のものは外側だけを置き直す */
+  function freezeScrollDependent(root, clone, win) {
+    const live = root.getElementsByTagName('*');
+    const copy = clone.getElementsByTagName('*');
+    if (live.length !== copy.length) return;
+    const done = [];
+    for (let i = 0; i < live.length; i++) {
+      const el = live[i];
+      const pos = win.getComputedStyle(el).position;
+      if (pos !== 'fixed' && pos !== 'sticky') continue;
+      if (done.some((d) => d.contains(el))) continue;
+      done.push(el);
+      const fix = pos === 'fixed' ? fixedPlacement(el, win) : stickyPlacement(el, win);
+      if (fix) {
+        copy[i].setAttribute('style', (copy[i].getAttribute('style') || '') + ';' + fix);
+      }
+    }
+  }
+
+  /* fixed を、今の表示位置に absolute で置く宣言。offsetLeft / offsetTop は
+     fixed では表示領域に対する位置（transform を含まない）なので、
+     transform はそのまま残して重ねがけにならない */
+  function fixedPlacement(el, win) {
+    let ox = 0;
+    let oy = 0;
+    for (let a = el.parentElement; a; a = a.parentElement) {
+      const s = win.getComputedStyle(a);
+      // transform などを持つ祖先があると、fixed はその祖先に対して置かれる。
+      // 複製でも同じ祖先に対して置かれるので、置き直さなくてよい
+      if (s.transform !== 'none' || s.filter !== 'none' ||
+          s.perspective !== 'none' || /paint|layout|strict|content/.test(s.contain) ||
+          /transform|filter|perspective/.test(s.willChange)) {
+        return '';
+      }
+    }
+    // absolute にすると、位置指定のある最も近い祖先が基準になる
+    for (let a = el.parentElement; a && a !== el.ownerDocument.documentElement;
+      a = a.parentElement) {
+      if (win.getComputedStyle(a).position !== 'static') {
+        const b = a.getBoundingClientRect();
+        ox = b.left + win.scrollX + a.clientLeft;
+        oy = b.top + win.scrollY + a.clientTop;
+        break;
+      }
+    }
+    const left = el.offsetLeft + win.scrollX - ox;
+    const top = el.offsetTop + win.scrollY - oy;
+    return 'position:absolute!important;inset:auto!important;left:' + left +
+      'px!important;top:' + top + 'px!important;width:' + el.offsetWidth +
+      'px!important;height:' + el.offsetHeight + 'px!important;margin:0!important;' +
+      'box-sizing:border-box!important;min-width:0!important;max-width:none!important;' +
+      'min-height:0!important;max-height:none!important';
+  }
+
+  /* 貼り付いている sticky を、流れの上の位置からのずれで relative に置く宣言。
+     流れの上の位置は、一瞬だけ static にして測る（同じ処理の中で元に戻すので
+     画面には出ない）。内側の要素のスクロールで貼り付くものは扱わない */
+  function stickyPlacement(el, win) {
+    const doc = el.ownerDocument;
+    for (let a = el.parentElement; a && a !== doc.body && a !== doc.documentElement;
+      a = a.parentElement) {
+      const s = win.getComputedStyle(a);
+      if (s.overflowX !== 'visible' || s.overflowY !== 'visible') return '';
+    }
+    const now = el.getBoundingClientRect();
+    const saved = el.getAttribute('style');
+    let flow;
+    try {
+      el.style.setProperty('position', 'static', 'important');
+      flow = el.getBoundingClientRect();
+    } finally {
+      // Chrome は el.style の変更を style 属性へ遅れて書き戻すので、先に読んで
+      // 確定させてから戻す（そうしないと後で style="" が残る）
+      el.getAttribute('style');
+      if (saved === null) el.removeAttribute('style');
+      else el.setAttribute('style', saved);
+    }
+    const dx = now.left - flow.left;
+    const dy = now.top - flow.top;
+    if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return '';
+    return 'position:relative!important;inset:auto!important;left:' + dx +
+      'px!important;top:' + dy + 'px!important';
+  }
+
+  /* 範囲（表示領域の座標）のスクリーンショットを PNG の data URL で返す。
+     表示中の文書を複製して SVG の foreignObject に入れ、ブラウザ自身の
+     描画で画像にしてから切り抜く。画像の大きさを表示領域（スクロールバーを
+     含む innerWidth × innerHeight）と同じにし、viewBox で今のスクロール位置を
+     映すので、幅で切り替わる CSS（@media）と vw / vh も表示と同じに効く。
+     レイアウトの幅はスクロールバーを除いた clientWidth にする。rem は SVG の
+     根要素が基準になるので、html の文字の大きさを移しておく。対象は
+     スクリプトなしで表示しているので、複製と表示の見た目は一致する。
+     このページが足した印（ハイライトのスタイル・画像の枠）は複製から外す */
+  async function captureRegion(r) {
+    const doc = frameDoc();
+    const win = frameWin();
+    const root = doc.documentElement;
+    const lw = root.clientWidth;
+    const iw = win.innerWidth;
+    const ih = win.innerHeight;
+    const sx = win.scrollX;
+    const sy = win.scrollY;
+    const dh = Math.max(root.scrollHeight, doc.body ? doc.body.scrollHeight : 0,
+      sy + ih);
+    const clone = root.cloneNode(true);
+    freezeScrollDependent(root, clone, win);
+    clone.querySelectorAll('script, link, [data-hle-style]').forEach((x) => x.remove());
+    clone.querySelectorAll('[data-hle-obj]').forEach((x) => x.removeAttribute('data-hle-obj'));
+    makeXmlSafe(clone);
+    const xml = new XMLSerializer().serializeToString(clone);
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + iw +
+      '" height="' + ih + '" viewBox="' + sx + ' ' + sy + ' ' + iw + ' ' + ih +
+      '" style="font-size:' + win.getComputedStyle(root).fontSize + '">' +
+      '<foreignObject x="0" y="0" width="' + lw + '" height="' + dh +
+      '" style="overflow:visible">' + xml + '</foreignObject></svg>';
+    const img = new Image();
+    img.src = 'data:image/svg+xml;base64,' + base64Utf8(svg);
+    await img.decode();
+    const bg = pageBackground(doc, win);
+    let scale = Math.min(SHOT_SCALE, SHOT_MAX_EDGE / Math.max(r.w, r.h));
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.min(SHOT_MAX_EDGE, Math.round(r.w * scale)));
+      canvas.height = Math.max(1, Math.min(SHOT_MAX_EDGE, Math.round(r.h * scale)));
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = bg;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, r.x, r.y, r.w, r.h, 0, 0, canvas.width, canvas.height);
+      const url = canvas.toDataURL('image/png');
+      // 写真の多い範囲などで上限を超えたら、解像度を下げて作り直す
+      if ((url.length - url.indexOf(',') - 1) * 0.75 <= SHOT_MAX_BYTES) return url;
+      scale *= 0.7;
+    }
+    throw new Error('スクリーンショットが大きすぎます。範囲を小さくしてください');
+  }
+
+  /* 囲み終えた範囲をスクリーンショットにして、下書き欄を開く。
+     下書きを書いている途中で囲み直した場合は、書いた文を残して範囲だけ替える */
+  async function createRegionDraft(r) {
+    pendingRect = r;
+    paintRegions();
+    try {
+      const region = buildRegion(r);
+      const texts = regionTexts(r);
+      const shot = await captureRegion(r);
+      draft = {
+        cid: newCid(), target: 'region', region: region, texts: texts,
+        quote: regionLabel(texts), shot: shot,
+      };
+      selectedObj = null;
+      lastSel = null;
+      pendingRect = null;
+      showDraft('▭ ' + (draft.quote || '範囲（文字なし）'), shot, true);
+    } catch (e) {
+      pendingRect = null;
+      paintRegions();
+      alert('範囲のスクリーンショットを作れませんでした: ' +
+        (e && e.message ? e.message : e));
+    }
+  }
+
+  /* 範囲コメントの枠を、親ページ側の層に描き直す */
+  function paintRegions() {
+    const lay = layer();
+    const doc = frameDoc();
+    if (!lay || !session || !doc || !doc.documentElement) return;
+    const root = doc.documentElement;
+    // スクロールバーの上には重ねない（スクロールバーを操作できるように）
+    lay.style.width = root.clientWidth + 'px';
+    lay.style.height = root.clientHeight + 'px';
+    const boxes = [];
+    const cur = session.revisions.length - 1;
+    session.comments.forEach((c, i) => {
+      if (c.target !== 'region') return;
+      const r = regionClientRect(c.region);
+      if (!r) return;
+      // 前の稿で囲んだ範囲は、今の稿では図が書き換わっていることがある。
+      // 同じ位置に描くが、見た目と番号で前の稿のものだと分かるようにする
+      const stale = typeof c.revision === 'number' && c.revision < cur;
+      boxes.push({
+        r: r, cid: c.id,
+        label: 'C' + (i + 1) + (stale ? '・第' + (c.revision + 1) + '稿' : ''),
+        cls: (c.id === activeCid ? 'active' : '') + (stale ? ' stale' : ''),
+      });
+    });
+    if (draft && draft.target === 'region') {
+      const r = regionClientRect(draft.region);
+      if (r) boxes.push({ r: r, cls: 'draft' });
+    }
+    const live = drawing ? normRect(drawing) : pendingRect;
+    if (live) boxes.push({ r: live, cls: 'draft' });
+    lay.textContent = '';
+    boxes.forEach((b) => {
+      const el = document.createElement('div');
+      el.className = ('region-box ' + (b.cls || '')).trim();
+      el.style.left = b.r.x + 'px';
+      el.style.top = b.r.y + 'px';
+      el.style.width = b.r.w + 'px';
+      el.style.height = b.r.h + 'px';
+      if (b.cid) {
+        el.dataset.cid = b.cid;
+        const tag = document.createElement('span');
+        tag.className = 'region-tag';
+        tag.textContent = b.label;
+        tag.title = 'クリックでコメントを開く';
+        // 範囲指定モード中でも、番号を押したときは囲み始めない
+        tag.addEventListener('pointerdown', (e) => e.stopPropagation());
+        tag.addEventListener('click', () => activateComment(b.cid, false));
+        el.appendChild(tag);
+      }
+      lay.appendChild(el);
+    });
+  }
+
+  let paintQueued = false;
+  function schedulePaintRegions() {
+    if (paintQueued) return;
+    paintQueued = true;
+    requestAnimationFrame(() => {
+      paintQueued = false;
+      paintRegions();
+    });
+  }
+
+  /* 表示領域の座標 (x, y) にある範囲コメント（重なっていれば後のもの） */
+  function regionAt(x, y) {
+    let found = null;
+    session.comments.forEach((c) => {
+      if (c.target !== 'region') return;
+      const r = regionClientRect(c.region);
+      if (r && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
+        found = c.id;
+      }
+    });
+    return found;
+  }
+
+  /* 範囲が表示領域の中央に来るよう iframe をスクロールする */
+  function scrollToRegion(region) {
+    const r = regionClientRect(region);
+    const win = frameWin();
+    if (!r || !win) return;
+    win.scrollTo({
+      left: win.scrollX + r.x - Math.max(0, (win.innerWidth - r.w) / 2),
+      top: win.scrollY + r.y - Math.max(0, (win.innerHeight - r.h) / 2),
+      behavior: 'smooth',
+    });
   }
 
   /* ---------- ポーリング（AI返信・新リビジョン検知） ---------- */

@@ -428,6 +428,24 @@ class _Handler(BaseHTTPRequestHandler):
             # stale=True は「前の稿への編集なので別枠に退避した」の意味
             self._send_json({"ok": True, "stale": not current})
         elif parts[3] == "comments" and len(parts) == 4:
+            target = str(body.get("target", "") or "text")
+            tag = str(body.get("tag", "") or storage.DEFAULT_COMMENT_TAG)
+            if target == "region":
+                # 範囲コメントは、ブラウザが切り抜いたスクリーンショット（PNG）と
+                # 一緒に1回で受け取り、画像とコメントを揃えて保存する
+                comment = storage.add_region_comment(
+                    sid,
+                    screenshot=_decode_png_base64(body.get("screenshot")),
+                    text=str(body.get("text", "")),
+                    region=body.get("region"),
+                    texts=body.get("texts"),
+                    quote=str(body.get("quote", "") or ""),
+                    author=str(body.get("author", "human")),
+                    comment_id=body.get("id"),
+                    tag=tag,
+                )
+                self._send_json(comment)
+                return
             comment = storage.add_comment(
                 sid,
                 quote=str(body.get("quote", "")),
@@ -436,10 +454,10 @@ class _Handler(BaseHTTPRequestHandler):
                 comment_id=body.get("id"),
                 prefix=str(body.get("prefix", "") or ""),
                 suffix=str(body.get("suffix", "") or ""),
-                target=str(body.get("target", "") or "text"),
+                target=target,
                 image=str(body.get("image", "") or ""),
                 image_ref=str(body.get("image_ref", "") or ""),
-                tag=str(body.get("tag", "") or storage.DEFAULT_COMMENT_TAG),
+                tag=tag,
             )
             self._send_json(comment)
         elif parts[3] == "comments" and len(parts) == 6 and parts[5] == "replies":
@@ -488,6 +506,18 @@ class _Handler(BaseHTTPRequestHandler):
             )
         else:
             self._send_error_json(404, "不明なパスです")
+
+
+def _decode_png_base64(value) -> bytes:
+    """base64 のスクリーンショットを復号する（data URL の接頭辞も受け付ける）。"""
+    if not isinstance(value, str) or not value:
+        raise ValueError("範囲コメントには screenshot（PNGのbase64）が必要です")
+    if value.startswith("data:"):
+        value = value.split(",", 1)[-1]
+    try:
+        return base64.b64decode(value, validate=True)
+    except Exception as e:  # noqa: BLE001
+        raise ValueError(f"screenshot のbase64を復号できません: {e}") from e
 
 
 # ---------- サーバーライフサイクル ----------

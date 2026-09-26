@@ -12,6 +12,75 @@
   display: flex;
   min-width: 0;
   background: #fff;
+  position: relative;
+}
+
+/* ---------- 範囲指定 ----------
+   範囲の枠は iframe の上に重ねた層に描く（レビュー対象のDOMは変えない）。
+   ふだんの層はクリックを素通りさせ、範囲指定モードの間だけドラッグを受ける */
+#region-layer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+#region-layer.drawing {
+  pointer-events: auto;
+  cursor: crosshair;
+  touch-action: none;
+}
+.region-box {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px dashed rgba(249, 171, 0, .95);
+  background: rgba(255, 213, 79, .08);
+  pointer-events: none;
+}
+.region-box.active {
+  border-style: solid;
+  border-color: #f57c00;
+  background: rgba(255, 152, 0, .14);
+}
+.region-box.draft {
+  border-color: #1a73e8;
+  background: rgba(26, 115, 232, .08);
+}
+.region-box .region-tag {
+  position: absolute;
+  left: 0;
+  top: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 0 6px;
+  color: #fff;
+  background: #f9ab00;
+  border-bottom-right-radius: 6px;
+  pointer-events: auto;
+  cursor: pointer;
+}
+.region-box.active .region-tag { background: #f57c00; }
+/* 前の稿で囲んだ範囲（今の稿では図が変わっていることがある） */
+.region-box.stale {
+  border-color: rgba(128, 134, 139, .8);
+  background: rgba(128, 134, 139, .06);
+}
+.region-box.stale .region-tag { background: #80868b; }
+.region-box.stale.active { border-color: #f57c00; }
+#actions button#btn-region.on {
+  background: #e8f0fe;
+  color: #1967d2;
+  border-color: #1967d2;
+}
+/* 下書き欄には、AIに渡るスクリーンショットをそのまま見せる */
+#comment-draft .quote.shot-quote img {
+  display: block;
+  max-width: 100%;
+  max-height: 180px;
+  margin-bottom: 4px;
+  border: 1px solid #dadce0;
+  border-radius: 4px;
+  background: #fff;
 }
 
 #doc-frame {
