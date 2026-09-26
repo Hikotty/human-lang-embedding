@@ -7,6 +7,7 @@ sandbox付きiframeでの表示・範囲選択コメント・ハイライト・
 from __future__ import annotations
 
 import base64
+import re
 
 import pytest
 from playwright.sync_api import expect
@@ -294,3 +295,196 @@ def test_text_comment_still_works_after_image_selection(html_review):
     c = storage.load_session(sid)["comments"][0]
     assert c["quote"] == "重要な説明"
     assert "target" not in c  # テキストコメントは従来の形のまま
+
+
+# ---------- 図（インラインSVG）の中の文字への実際のマウス操作 ----------
+# 上の test_svg_text_selection は選択をスクリプトで作るので click が起きない。
+# 実際にドラッグすると、離したときに図の click が届き、図全体が選ばれて
+# 選んだ文字列が捨てられていた（全コメントの quote が図の名前になる）。
+# ここではブラウザの入力経路を通したドラッグで、その経路を検証する。
+
+DIAGRAM_DOC = """<!doctype html>
+<html><head><style>
+body{margin:0;font-family:sans-serif}
+.t{font:600 28px sans-serif;fill:#2d3142}
+</style></head><body>
+<p id="lead">図の前の段落です。</p>
+<svg id="fig" viewBox="0 0 800 300" width="800" height="300"
+     role="img" aria-label="構成図 v1">
+<rect x="20" y="20" width="360" height="160" fill="#fde"/>
+<text id="l1" class="t" x="40" y="90">左の箱のラベル</text>
+<text id="l2" class="t" x="420" y="90">右の箱のラベル</text>
+<text id="l3" class="t" x="40" y="250">下のラベル</text>
+</svg>
+</body></html>"""
+
+
+@pytest.fixture()
+def diagram_review(browser, web_port):
+    """図解のHTMLセッションを作成してレビューページを開く。"""
+    session = storage.create_session(
+        DIAGRAM_DOC, "図解 E2E", "/tmp/e2e", mode="html",
+        source_path="/tmp/e2e/diagram.html")
+    context = browser.new_context(viewport={"width": 1400, "height": 900})
+    page = context.new_page()
+    page.goto(f"http://127.0.0.1:{web_port}/session/{session['id']}")
+    page.wait_for_function(
+        """() => {
+            const f = document.getElementById('doc-frame');
+            return !!(f && f.contentDocument &&
+                      f.contentDocument.querySelector('#l3'));
+        }"""
+    )
+    yield page, session["id"]
+    context.close()
+
+
+def _mouse(cdp, kind: str, x: float, y: float, pressed: bool) -> None:
+    cdp.send("Input.dispatchMouseEvent", {
+        "type": kind, "x": x, "y": y, "clickCount": 1,
+        "button": "left" if pressed or kind != "mouseMoved" else "none",
+        "buttons": 1 if pressed else 0,
+    })
+
+
+def real_drag(page, x0: float, y0: float, x1: float, y1: float,
+              steps: int = 8) -> None:
+    """ブラウザの入力経路を通して、押す→動かす→離すのドラッグをする。
+
+    Playwright の page.mouse はボタンを押したまま動かすと、ドラッグの開始を
+    調べるために全フレームでスクリプトを評価する。スクリプトを許可しない
+    sandbox の iframe があるとその評価が返らず、move が固まる。そこで CDP の
+    Input.dispatchMouseEvent で入力を直接送る。ブラウザ側では実際のマウス
+    操作と同じに扱われ、文字の選択と click イベントが起きる。
+    """
+    cdp = page.context.new_cdp_session(page)
+    try:
+        _mouse(cdp, "mouseMoved", x0, y0, False)
+        _mouse(cdp, "mousePressed", x0, y0, True)
+        for i in range(1, steps + 1):
+            _mouse(cdp, "mouseMoved", x0 + (x1 - x0) * i / steps,
+                   y0 + (y1 - y0) * i / steps, True)
+        _mouse(cdp, "mouseReleased", x1, y1, False)
+    finally:
+        cdp.detach()
+
+
+def real_click(page, x: float, y: float) -> None:
+    """ブラウザの入力経路を通して、動かさずに押して離す。"""
+    cdp = page.context.new_cdp_session(page)
+    try:
+        _mouse(cdp, "mouseMoved", x, y, False)
+        _mouse(cdp, "mousePressed", x, y, True)
+        _mouse(cdp, "mouseReleased", x, y, False)
+    finally:
+        cdp.detach()
+
+
+def char_box(page, selector: str, start: int, end: int) -> dict:
+    """iframe内の文字 start〜end の矩形を、ページ全体の座標で返す。"""
+    return page.evaluate(
+        """([sel, s, e]) => {
+            const f = document.getElementById('doc-frame');
+            const doc = f.contentDocument;
+            const node = doc.querySelector(sel).firstChild;
+            const r = doc.createRange();
+            r.setStart(node, s);
+            r.setEnd(node, e);
+            const b = r.getBoundingClientRect();
+            const fb = f.getBoundingClientRect();
+            return {x: fb.left + b.left, y: fb.top + b.top,
+                    w: b.width, h: b.height};
+        }""",
+        [selector, start, end],
+    )
+
+
+def drag_over_chars(page, selector: str, start: int, end: int) -> None:
+    """文字 start〜end の上を左から右へドラッグして選ぶ。"""
+    b = char_box(page, selector, start, end)
+    y = b["y"] + b["h"] / 2
+    real_drag(page, b["x"] + 1, y, b["x"] + b["w"] - 1, y)
+
+
+def test_dragging_svg_text_comments_the_text_not_the_figure(diagram_review):
+    """図の中の文字をドラッグで選ぶと、その文字列へのコメントになる。"""
+    page, sid = diagram_review
+    drag_over_chars(page, "#l1", 0, 4)  # 「左の箱の」
+    page.click("#btn-comment")
+    expect(page.locator("#draft-quote")).to_have_text("左の箱の")
+    page.fill("#draft-text", "箱の名前を正式名称に")
+    page.click("#draft-submit")
+    expect(page.locator(".comment-card")).to_have_count(1)
+
+    c = storage.load_session(sid)["comments"][0]
+    assert c["quote"] == "左の箱の"
+    assert "target" not in c  # 図全体（target="image"）にはならない
+    # 前後の文脈には要素の間の改行も入る（Range.toString() と同じ連結）
+    assert "図の前の段落です。" in c["prefix"]
+    assert c["suffix"].startswith("ラベル")
+    # 図の中の文字にもハイライトが付き、図は選択枠で囲まれない
+    count = page.evaluate(
+        """() => {
+            const win = document.getElementById('doc-frame').contentWindow;
+            const h = win.CSS.highlights.get('hle-comment');
+            return h ? h.size : -1;
+        }"""
+    )
+    assert count == 1
+    assert frame_attr(page, "#fig", "data-hle-obj") is None
+
+
+def test_drag_across_svg_labels_keeps_whole_selection(diagram_review):
+    """複数のラベルにまたがるドラッグも、選んだ文字列のまま残る。"""
+    page, sid = diagram_review
+    a = char_box(page, "#l1", 2, 3)  # 「箱」
+    b = char_box(page, "#l2", 2, 3)  # 右のラベルの「箱」
+    real_drag(page, a["x"] + 1, a["y"] + a["h"] / 2,
+              b["x"] + b["w"] - 1, b["y"] + b["h"] / 2)
+    page.click("#btn-comment")
+    page.fill("#draft-text", "ラベルの書き方を揃える")
+    page.click("#draft-submit")
+    expect(page.locator(".comment-card")).to_have_count(1)
+    c = storage.load_session(sid)["comments"][0]
+    assert "target" not in c
+    assert c["quote"].startswith("箱のラベル")
+    assert c["quote"].endswith("右の箱")
+
+
+def test_click_on_commented_svg_text_opens_card_else_selects_figure(
+        diagram_review):
+    """図の中のコメント済み文字列をクリックするとカードが開き、
+    文字のない所をクリックすると従来どおり図が選ばれる。"""
+    page, _sid = diagram_review
+    drag_over_chars(page, "#l2", 0, 3)  # 「右の箱」
+    page.click("#btn-comment")
+    page.fill("#draft-text", "右の説明")
+    page.click("#draft-submit")
+    expect(page.locator(".comment-card")).to_have_count(1)
+    card = page.locator(".comment-card").first
+    assert "active" not in (card.get_attribute("class") or "")
+
+    # ドラッグの選択が残っていると「選択の上のクリック」になるので外しておく
+    page.evaluate("""() => document.getElementById('doc-frame')
+        .contentDocument.getSelection().removeAllRanges()""")
+    b = char_box(page, "#l2", 1, 2)
+    real_click(page, b["x"] + b["w"] / 2, b["y"] + b["h"] / 2)
+    expect(card).to_have_class(re.compile(r"\bactive\b"))
+    assert frame_attr(page, "#fig", "data-hle-obj") is None
+
+    # 文字のない所（図の右下の余白）は図そのものの選択になる
+    fig = page.evaluate(
+        """() => {
+            const f = document.getElementById('doc-frame');
+            const r = f.contentDocument.querySelector('#fig')
+              .getBoundingClientRect();
+            const fb = f.getBoundingClientRect();
+            return {x: fb.left + r.right - 20, y: fb.top + r.bottom - 20};
+        }"""
+    )
+    real_click(page, fig["x"], fig["y"])
+    page.wait_for_function(
+        """() => document.getElementById('doc-frame').contentDocument
+            .querySelector('#fig').getAttribute('data-hle-obj') === 'sel'""")
+    page.click("#btn-comment")
+    expect(page.locator("#draft-quote")).to_have_text("🖼 構成図 v1")

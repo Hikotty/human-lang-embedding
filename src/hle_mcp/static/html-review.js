@@ -338,13 +338,62 @@
     }
   }
 
+  /* iframe内の文字列の選択が要素 el に掛かっているか（空白だけの選択は
+     数えない）。図の中の文字を選び終えたときに届く click を見分けるのに使う。
+     別の場所に前の選択が残ったまま画像をクリックした場合は掛からないので、
+     従来どおり画像の選択になる */
+  function selectionTouches(el) {
+    const win = frameWin();
+    const sel = win && win.getSelection && win.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return false;
+    if (!sel.toString().trim()) return false;
+    try {
+      return sel.getRangeAt(0).intersectsNode(el);
+    } catch (err) {
+      return false;
+    }
+  }
+
+  /* iframeの表示領域の座標 (x, y) にある、コメント済みの文字列を返す。
+     ハイライトの矩形そのもので判定するので、文字の外側は拾わない */
+  function textAnchorAt(x, y) {
+    for (const [cid, r] of anchors) {
+      let rects;
+      try { rects = r.getClientRects(); } catch (err) { continue; }
+      for (const b of rects) {
+        if (x >= b.left && x <= b.right && y >= b.top && y <= b.bottom) {
+          return cid;
+        }
+      }
+    }
+    return null;
+  }
+
   /* ハイライト済みの本文をクリックしたら対応するコメントを選択する。
-     画像・図のクリックは「コメント対象の指定」として扱う */
+     画像・図のクリックは「コメント対象の指定」として扱う。
+
+     ただし文字列をドラッグで選び終えたときにも click は届く。押した要素と
+     離した要素の共通の祖先に届くので、図（インラインSVG）の中の文字を選ぶと
+     図のクリックになる。そのまま図を選ぶと、選んだ文字列が捨てられて
+     図全体へのコメントになってしまうので、選択が図に掛かっているときは
+     図を選ばずに、その文字列をコメント対象として残す */
   function onFrameClick(e) {
     clearJumpHighlight();
     const doc = frameDoc();
-    const obj = e.target.closest && e.target.closest(OBJ_SELECTOR);
+    let obj = e.target.closest && e.target.closest(OBJ_SELECTOR);
+    if (obj && selectionTouches(obj)) {
+      // selectionchange より先に click が届いても選んだ文字列を取りこぼさない
+      captureSelection();
+      obj = null;
+    }
     if (obj) {
+      // 図の中でも、コメント済みの文字列の上ならそのコメントを開く
+      const hit = textAnchorAt(e.clientX, e.clientY);
+      if (hit) {
+        selectedObj = null;
+        activateComment(hit, false);
+        return;
+      }
       selectedObj = obj;
       lastSel = null; // 画像を選んだら直前の文字列選択は捨てる
       for (const [cid, el] of objAnchors) {
