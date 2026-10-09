@@ -236,11 +236,118 @@ def test_save_image_and_get_path(png_file):
 
 
 def test_save_image_unique_names(png_file):
+    """同名で中身の違うファイルは連番の別名で保存する（撮り直した図など）。"""
     s = storage.create_session("t", "d", "")
     n1 = storage.add_image_file(s["id"], str(png_file))
+    png_file.write_bytes(png_file.read_bytes() + b"changed")
     n2 = storage.add_image_file(s["id"], str(png_file))
     assert n1 == "figure.png"
     assert n2 == "figure-1.png"
+    assert storage.get_image_path(s["id"], n2).read_bytes().endswith(b"changed")
+
+
+def test_add_same_file_twice_reuses_stored_name(tmp_path):
+    """同じ中身のファイルを渡し直しても複製を作らない（稿ごとに同じ動画を
+    渡しても、そのたびにコピーが増えない）。"""
+    s = storage.create_session("t", "d", "")
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"\x00" * 3000)
+    assert storage.add_image_file(s["id"], str(clip)) == "clip.mp4"
+    assert storage.add_image_file(s["id"], str(clip)) == "clip.mp4"
+    # 大きさが同じでも中身が違えば別のファイル
+    clip.write_bytes(b"\x01" * 3000)
+    assert storage.add_image_file(s["id"], str(clip)) == "clip-1.mp4"
+    # 中身が連番の側と同じなら、その名前を使う
+    assert storage.add_image_file(s["id"], str(clip)) == "clip-1.mp4"
+    assert storage.list_images(s["id"]) == ["clip-1.mp4", "clip.mp4"]
+
+
+def test_save_bytes_never_reuses_existing_file():
+    """バイト列の保存（ブラウザの追加・範囲スクリーンショット）は同じ中身でも
+    別名にする。範囲スクリーンショットはコメントを消すときに一緒に消すので、
+    他のコメントのファイルを指してはいけない。"""
+    s = storage.create_session("t", "d", "")
+    assert storage.save_image_bytes(s["id"], "a.png", b"same") == "a.png"
+    assert storage.save_image_bytes(s["id"], "a.png", b"same") == "a-1.png"
+
+
+@pytest.mark.parametrize(("name", "kind"), [
+    ("anim.gif", "image"), ("photo.JPG", "image"), ("p.avif", "image"),
+    ("clip.mp4", "video"), ("screen.mov", "video"), ("demo.webm", "video"),
+    ("old.ogv", "video"), ("c.m4v", "video"),
+    ("voice.mp3", "audio"), ("memo.m4a", "audio"), ("rec.wav", "audio"),
+    ("song.ogg", "audio"), ("x.opus", "audio"), ("hi.flac", "audio"),
+    ("a.aac", "audio"), ("b.oga", "audio"),
+])
+def test_media_types_accepted(name, kind):
+    s = storage.create_session("t", "d", "")
+    saved = storage.save_image_bytes(s["id"], name, b"data")
+    assert saved == name.rsplit(".", 1)[0] + "." + name.rsplit(".", 1)[1].lower()
+    assert storage.media_kind(saved) == kind
+    assert storage.get_image_path(s["id"], saved).read_bytes() == b"data"
+
+
+@pytest.mark.parametrize("name", [
+    "script.svg", "noext", "doc.pdf", "run.exe", "page.html", "a.mkv"])
+def test_unsupported_media_rejected(name):
+    s = storage.create_session("t", "d", "")
+    with pytest.raises(ValueError, match="対応していない形式"):
+        storage.save_image_bytes(s["id"], name, b"x")
+
+
+def test_media_size_limit_per_kind(monkeypatch, tmp_path):
+    """上限は種類ごと。動画は画像より大きなファイルを受け付ける。"""
+    monkeypatch.setitem(storage.MAX_MEDIA_BYTES, "image", 10)
+    monkeypatch.setitem(storage.MAX_MEDIA_BYTES, "video", 20)
+    monkeypatch.setitem(storage.MAX_MEDIA_BYTES, "audio", 15)
+    s = storage.create_session("t", "d", "")
+    assert storage.save_image_bytes(s["id"], "a.mp4", b"0" * 20) == "a.mp4"
+    with pytest.raises(ValueError, match="動画は"):
+        storage.save_image_bytes(s["id"], "b.mp4", b"0" * 21)
+    with pytest.raises(ValueError, match="画像は"):
+        storage.save_image_bytes(s["id"], "b.png", b"0" * 11)
+    with pytest.raises(ValueError, match="音声は"):
+        storage.save_image_bytes(s["id"], "b.mp3", b"0" * 16)
+    big = tmp_path / "big.mp4"
+    big.write_bytes(b"0" * 21)
+    with pytest.raises(ValueError, match="動画は"):
+        storage.add_image_file(s["id"], str(big))
+    # 断ったファイルも書き込み途中の一時ファイルも残らない
+    assert storage.list_images(s["id"]) == ["a.mp4"]
+    assert [p.name for p in storage.files_dir(s["id"]).iterdir()] == ["a.mp4"]
+
+
+def test_save_media_stream_writes_in_chunks(monkeypatch):
+    """長さの分かったストリームを分割して読み、途切れたら何も残さない。"""
+    import io
+
+    monkeypatch.setattr(storage, "_COPY_CHUNK", 7)
+    s = storage.create_session("t", "d", "")
+    body = bytes(range(256)) * 3
+    reads: list[int] = []
+    src = io.BytesIO(body)
+
+    def read(n):
+        reads.append(n)
+        return src.read(n)
+
+    stream = type("S", (), {"read": staticmethod(read)})()
+    name = storage.save_media_stream(s["id"], "clip.webm", stream, len(body))
+    assert storage.get_image_path(s["id"], name).read_bytes() == body
+    assert max(reads) == 7  # 一度に全体を読まない
+    with pytest.raises(ValueError, match="途切れ"):
+        storage.save_media_stream(s["id"], "cut.webm", io.BytesIO(b"abc"), 10)
+    assert storage.list_images(s["id"]) == ["clip.webm"]
+
+
+def test_partial_upload_files_are_hidden(monkeypatch):
+    """書き込み途中の一時ファイルは一覧にも配信にも出ない。"""
+    s = storage.create_session("t", "d", "")
+    part = storage.files_dir(s["id"]) / ".upload-abc.part"
+    part.write_bytes(b"x")
+    assert storage.list_images(s["id"]) == []
+    with pytest.raises(KeyError):
+        storage.get_image_path(s["id"], ".upload-abc.part")
 
 
 def test_image_name_sanitized():

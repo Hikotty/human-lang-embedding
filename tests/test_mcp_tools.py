@@ -310,3 +310,83 @@ def test_submit_revision_keeps_stored_image_refs(png_file, write_md):
     s = storage.load_session(sid)
     assert s["revisions"][1]["base_text"] == "第二稿。\n![図](figure.png)"
     assert storage.list_images(sid) == ["figure.png"]
+
+
+# ---------- 動画・音声・GIF ----------
+from pathlib import Path  # noqa: E402
+
+MEDIA_DIR = Path(__file__).parent / "fixtures" / "media"
+
+
+def _copy_media(dest_dir: Path, *names: str) -> None:
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    for n in names:
+        (dest_dir / n).write_bytes((MEDIA_DIR / n).read_bytes())
+
+
+def test_open_review_resolves_video_audio_and_gif_refs(tmp_path, write_md):
+    """![](パス) の動画・音声・GIF も画像と同じく解決・添付される。"""
+    _copy_media(tmp_path / "docs" / "media", "clip.mp4", "clip.mov",
+                "tone.mp3", "tone.wav", "anim.gif")
+    md = write_md(
+        "手順の説明。\n![操作の録画](media/clip.mp4)\n"
+        "画面収録は ![](media/clip.mov) のとおり。\n"
+        "![ナレーション](media/tone.mp3)\n![](media/tone.wav)\n"
+        "![動き](media/anim.gif)\n![無い動画](media/none.webm)\n"
+        "![PDF](media/doc.pdf)",
+        name="docs/guide.md")
+    (tmp_path / "docs" / "media" / "doc.pdf").write_bytes(b"%PDF")
+    out = json.loads(server.open_review(md, "メディア入り"))
+    assert out["images"] == ["clip.mp4", "clip.mov", "tone.mp3", "tone.wav",
+                             "anim.gif"]
+    # 見つからないもの・非対応の形式は missing_images で知らせる
+    assert out["missing_images"] == ["media/none.webm", "media/doc.pdf"]
+    s = storage.load_session(out["session_id"])
+    assert s["revisions"][0]["base_text"] == (
+        "手順の説明。\n![操作の録画](clip.mp4)\n"
+        "画面収録は ![](clip.mov) のとおり。\n"
+        "![ナレーション](tone.mp3)\n![](tone.wav)\n"
+        "![動き](anim.gif)\n![無い動画](media/none.webm)\n"
+        "![PDF](media/doc.pdf)")
+    for n in ("clip.mp4", "tone.mp3", "anim.gif"):
+        assert storage.get_image_path(out["session_id"], n).read_bytes() \
+            == (MEDIA_DIR / n).read_bytes()
+
+
+def test_open_review_images_param_accepts_media(tmp_path, write_md):
+    _copy_media(tmp_path / "att", "clip.webm", "tone.m4a")
+    md = write_md("本文のみ。")
+    out = json.loads(server.open_review(
+        md, "添付", images=[str(tmp_path / "att" / "clip.webm"),
+                           str(tmp_path / "att" / "tone.m4a")]))
+    assert out["images"] == ["clip.webm", "tone.m4a"]
+    s = storage.load_session(out["session_id"])
+    assert s["revisions"][0]["base_text"] == \
+        "本文のみ。\n![](clip.webm)\n![](tone.m4a)"
+
+
+def test_resubmitting_same_video_does_not_duplicate(tmp_path, write_md):
+    """稿ごとに同じローカルの動画を参照し直しても、コピーは1つのまま。"""
+    _copy_media(tmp_path / "media", "clip.mp4")
+    md = write_md("初稿。\n![録画](media/clip.mp4)")
+    sid = json.loads(server.open_review(md, "再提出"))["session_id"]
+    rev_md = write_md("第二稿。\n![録画](media/clip.mp4)", name="rev.md")
+    rev = json.loads(server.submit_revision(sid, rev_md, open_browser=False))
+    assert rev["images"] == ["clip.mp4"]
+    s = storage.load_session(sid)
+    assert s["revisions"][1]["base_text"] == "第二稿。\n![録画](clip.mp4)"
+    assert storage.list_images(sid) == ["clip.mp4"]
+    # 撮り直して中身が変われば別名で添付され、本文の参照もそちらを指す
+    (tmp_path / "media" / "clip.mp4").write_bytes(b"retaken")
+    rev3 = write_md("第三稿。\n![録画](media/clip.mp4)", name="rev3.md")
+    out3 = json.loads(server.submit_revision(sid, rev3, open_browser=False))
+    assert out3["images"] == ["clip-1.mp4"]
+    assert storage.load_session(sid)["revisions"][2]["base_text"] \
+        == "第三稿。\n![録画](clip-1.mp4)"
+
+
+def test_tool_descriptions_list_every_media_extension():
+    """ツール説明の対応形式が media.MEDIA_TYPES とずれていない。"""
+    doc = server.open_review.__doc__ or ""
+    for ext in storage.MEDIA_TYPES:
+        assert ext.lstrip(".") in doc, ext

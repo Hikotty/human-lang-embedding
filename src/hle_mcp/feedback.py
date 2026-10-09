@@ -23,6 +23,8 @@ from __future__ import annotations
 from html.parser import HTMLParser
 from typing import Any
 
+from .media import media_kind, media_label
+
 _ZWSP = "\u200b"
 
 # annotated_text のマーカー記号。本文中に同じ記号が現れると削除/追加の境界が
@@ -237,13 +239,15 @@ def compose_annotated(
     for para in paragraphs:
         if para.img is not None:
             name = escape_markers(para.img["name"])
+            # 種類の名前（画像・動画・音声）は拡張子から付ける
+            label = media_label(para.img["name"])
             if para.img["del"]:
-                body = f"【画像削除:{name}】"
+                body = f"【{label}削除:{name}】"
             elif para.img["ins"]:
-                body = f"【画像追加:{name}】"
+                body = f"【{label}追加:{name}】"
             else:
                 body = escape_markers(para.img["md"])
-            # 画像そのものに付いたコメントは画像行全体を範囲として示す
+            # メディアそのものに付いたコメントは行全体を範囲として示す
             nums = [
                 n
                 for n in (
@@ -295,15 +299,18 @@ def compose_changes(paragraphs: list[_Paragraph]) -> list[dict[str, Any]]:
     changes: list[dict[str, Any]] = []
     for i, para in enumerate(paragraphs):
         if para.img is not None:
+            # 埋め込みメディア（画像・動画・音声）の削除指定と追加。type は
+            # 画像だけだった頃の名前のまま、kind で種類を示す
+            kind = media_kind(para.img["name"]) or "image"
             if para.img["del"]:
                 changes.append(
                     {"type": "image_delete", "paragraph": i,
-                     "text": para.img["name"]}
+                     "text": para.img["name"], "kind": kind}
                 )
             elif para.img["ins"]:
                 changes.append(
                     {"type": "image_insert", "paragraph": i,
-                     "text": para.img["name"]}
+                     "text": para.img["name"], "kind": kind}
                 )
             continue
         for seg in _merged_segments(para):
@@ -331,9 +338,10 @@ def _comment_view(comment: dict[str, Any], number: int) -> dict[str, Any]:
     "question"（質問）は返信で答えるだけで本文は変えないもの。tag を
     持たない旧データは指摘として扱う（保存層の既定と同じ）。
 
-    target="image" は文字列ではなく画像そのものへの指摘。image が対象の名前
-    （mdモードでは添付画像のファイル名）、image_ref はHTMLレビューで対象要素を
-    「タグ名:出現順」で指すアンカー。
+    target="image" は文字列ではなく埋め込んだメディア（画像・動画・音声）
+    そのものへの指摘。image が対象の名前（mdモードでは添付ファイル名で、kind に
+    種類が付く）、image_ref はHTMLレビューで対象要素を「タグ名:出現順」で指す
+    アンカー（img:0、video:0、audio:0 など。タグ名が種類を表す）。
 
     target="region" はHTMLレビューで人間がドラッグで囲んだ範囲への指摘。
     image がその範囲のスクリーンショットのファイル名、screenshot_size が
@@ -358,6 +366,12 @@ def _comment_view(comment: dict[str, Any], number: int) -> dict[str, Any]:
         view["image"] = comment.get("image", "")
         if comment.get("image_ref"):
             view["image_ref"] = comment["image_ref"]
+        else:
+            # mdモードの添付ファイル名なら種類が分かる（HTMLレビューの名前は
+            # alt などの表示名なので、種類は image_ref のタグ名で示す）
+            kind = media_kind(view["image"])
+            if kind:
+                view["kind"] = kind
     elif view["target"] == "region":
         view["image"] = comment.get("image", "")
         view["screenshot_size"] = comment.get("screenshot_size", [])
@@ -397,9 +411,10 @@ def build_html_feedback(session: dict[str, Any]) -> dict[str, Any]:
             "（直前・直後の文脈）で該当箇所を特定して修正すること。"
             "quote はレンダリング後のテキストで、HTMLソース上ではタグを"
             "跨いでいる場合がある。"
-            'target="image" のコメントは画像や図そのものへの指摘で、'
+            'target="image" のコメントは画像や図、動画・音声そのものへの指摘で、'
             "image_ref が対象要素を「タグ名:出現順（0起点）」で指す"
-            "（例 img:2 はソース中3番目の <img>、svg:0 は最初の <svg>）。"
+            "（例 img:2 はソース中3番目の <img>、svg:0 は最初の <svg>、"
+            "video:0 は最初の <video>、audio:0 は最初の <audio>）。"
             'target="region" のコメントは、人間がページ上をドラッグで囲んだ'
             "範囲への指摘で、その範囲のスクリーンショットを見て判断すること。"
             "screenshot がPNGの絶対パスで、現在の稿への範囲コメントの画像は"

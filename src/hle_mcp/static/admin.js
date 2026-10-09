@@ -48,10 +48,10 @@
       .replace(/【追加:([\s\S]*?)】/g, '<ins>$1</ins>')
       .replace(/【改行追加】/g, '<span class="nl-badge">改行追加</span>')
       .replace(/【改行削除】/g, '<span class="nl-badge">改行削除</span>')
-      .replace(/【画像削除:([^】]*)】/g,
-        '<span class="img-badge">画像削除: $1</span>')
-      .replace(/【画像追加:([^】]*)】/g,
-        '<span class="img-badge">画像追加: $1</span>')
+      .replace(/【(画像|動画|音声)削除:([^】]*)】/g,
+        '<span class="img-badge">$1削除: $2</span>')
+      .replace(/【(画像|動画|音声)追加:([^】]*)】/g,
+        '<span class="img-badge">$1追加: $2</span>')
       .replace(/〖C(\d+)〗/g,
         '<span class="cmt-label">C$1[</span><span class="cmt-mark">')
       .replace(/〖\/C(\d+)〗/g,

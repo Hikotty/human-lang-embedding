@@ -233,6 +233,11 @@ html, body {
 .comment-card .quote.img-quote img {
   width: 46px; height: 32px; object-fit: cover; border-radius: 3px; flex: none;
 }
+.comment-card .quote.img-quote .media-icon {
+  width: 46px; height: 32px; flex: none; border-radius: 3px; background: #f1f3f4;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 18px;
+}
 .comment-card .quote .rev-note {
   display: inline-block; margin: 0 6px 0 2px; color: #b06000; font-size: 10px;
   border: 1px solid #f9ab00; border-radius: 8px; padding: 0 5px;
@@ -370,10 +375,16 @@ html, body {
   border: 1px dashed transparent; border-radius: 6px; cursor: pointer;
   user-select: none;
 }
-#editor .img-para img {
+#editor .img-para img,
+#editor .img-para video {
   max-width: 100%; max-height: 420px; border-radius: 4px;
-  box-shadow: 0 1px 4px rgba(0,0,0,.2);
+  box-shadow: 0 1px 4px rgba(0,0,0,.2); vertical-align: middle;
 }
+/* 動画は絵が届くまで高さが無いので、読み込み中も枠を確保して並びを揺らさない */
+#editor .img-para video { min-width: 240px; min-height: 135px; background: #000; }
+#editor .img-para audio { width: min(480px, 100%); vertical-align: middle; }
+/* プレーヤーの上ではカーソルを操作用のままにする（段落はクリックで選べる） */
+#editor .img-para video, #editor .img-para audio { cursor: auto; }
 #editor .img-para .img-caption {
   display: block; font-size: 11px; color: #9aa0a6; margin-top: 2px;
 }
@@ -386,7 +397,9 @@ html, body {
 }
 #editor .img-para.cmt-active { border-color: #f57c00; background: #feefc3; }
 #editor .img-para.sel { border-color: #1a73e8; background: #e8f0fe; }
-#editor .img-para[data-del="1"] img { opacity: .35; }
+#editor .img-para[data-del="1"] img,
+#editor .img-para[data-del="1"] video,
+#editor .img-para[data-del="1"] audio { opacity: .35; }
 #editor .img-para[data-del="1"] {
   border-color: #c5221f; background: rgba(197,34,31,.05);
 }

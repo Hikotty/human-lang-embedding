@@ -219,3 +219,67 @@ def test_json_security_headers(web_port):
     _, headers, _ = _request(web_port, "/api/health")
     assert headers.get("X-Content-Type-Options") == "nosniff"
     assert "default-src 'none'" in (headers.get("Content-Security-Policy") or "")
+
+
+# ---------- メディアの添付（生のバイト列） ----------
+def _upload(port: int, sid: str, name: str, data: bytes, headers: dict):
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/api/sessions/{sid}/files?name={name}",
+        data=data, headers=headers, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req) as res:
+            return res.status, json.loads(res.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read())
+
+
+def test_upload_accepts_octet_stream_from_own_origin(web_port, sid):
+    status, res = _upload(web_port, sid, "clip.webm", b"webm", {
+        "Content-Type": "application/octet-stream",
+        "Origin": f"http://127.0.0.1:{web_port}",
+    })
+    assert status == 200 and res["name"] == "clip.webm"
+
+
+@pytest.mark.parametrize("ctype", [
+    # simple request で送れる型（プリフライトなしで他サイトから届く）
+    "text/plain", "multipart/form-data; boundary=x",
+    "application/x-www-form-urlencoded",
+    # JSON でも添付の口には受けない（中身をファイルとして書いてしまう）
+    "application/json", "",
+])
+def test_upload_requires_octet_stream(web_port, sid, ctype):
+    status, res = _upload(web_port, sid, "clip.webm", b"webm",
+                          {"Content-Type": ctype} if ctype else {})
+    assert status == 403
+    assert "application/octet-stream" in res["error"]
+    assert storage.list_images(sid) == []
+
+
+def test_upload_rejects_foreign_origin(web_port, sid):
+    status, res = _upload(web_port, sid, "clip.webm", b"webm", {
+        "Content-Type": "application/octet-stream",
+        "Origin": "https://evil.example",
+    })
+    assert status == 403 and "Origin" in res["error"]
+    assert storage.list_images(sid) == []
+
+
+def test_octet_stream_is_not_accepted_elsewhere(web_port, sid):
+    """octet-stream を許すのは添付の口だけ。他の書き込みは JSON 必須のまま。"""
+    status, _, _ = _request(
+        web_port, f"/api/sessions/{sid}/document", method="POST",
+        headers={"Content-Type": "application/octet-stream"},
+        body={"html": "<p>改ざん</p>"},
+    )
+    assert status == 403
+    assert storage.load_session(sid)["revisions"][-1]["edited_html"] is None
+
+
+def test_editor_csp_allows_same_origin_media(web_port, sid):
+    """本文の動画・音声（同じオリジンの添付）を読み込めるCSPになっている。"""
+    _, headers, _ = _request(web_port, f"/session/{sid}")
+    csp = headers.get("Content-Security-Policy") or ""
+    assert "media-src 'self'" in csp
+    assert "media-src 'self' data:" not in csp  # 外部や data: は不要

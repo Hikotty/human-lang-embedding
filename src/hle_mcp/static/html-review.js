@@ -14,7 +14,7 @@
   const CONTEXT_LEN = 50;   // prefix/suffix として保存する文脈の長さ
   const QUOTE_LIMIT = 300;  // quote の最大長（mdエディタと同じ）
   // テキストとして選択できないため、要素ごとコメント対象にできるもの
-  const OBJ_SELECTOR = 'img, svg, canvas, video';
+  const OBJ_SELECTOR = 'img, svg, canvas, video, audio';
 
   async function api(path, method, body) {
     const opts = { method: method || 'GET', headers: {} };
@@ -152,6 +152,7 @@
     (doc.head || doc.body).appendChild(style);
     doc.addEventListener('selectionchange', captureSelection);
     doc.addEventListener('click', onFrameClick);
+    doc.addEventListener('focusin', onFrameFocusIn);
     doc.addEventListener('keydown', onKeyDown);
     // 範囲の枠は親ページ側の層に描くので、iframe のスクロールと、スクロールを
     // 伴わない再レイアウト（<details> の開閉、遅れて読み込まれた画像など）に
@@ -272,6 +273,15 @@
       return alt || src.split(/[?#]/)[0].split('/').pop() || '画像';
     }
     if (tag === 'svg') return alt || '図（SVG）';
+    if (tag === 'video' || tag === 'audio') {
+      // src は要素か、最初の <source> に書かれる
+      const source = el.querySelector('source[src]');
+      const src = el.getAttribute('src') ||
+        (source ? source.getAttribute('src') : '') || '';
+      const kind = tag === 'video' ? '動画' : '音声';
+      if (!src || /^data:/i.test(src)) return alt || kind + '（埋め込み）';
+      return alt || src.split(/[?#]/)[0].split('/').pop() || kind;
+    }
     return alt || tag;
   }
 
@@ -407,6 +417,21 @@
      図のクリックになる。そのまま図を選ぶと、選んだ文字列が捨てられて
      図全体へのコメントになってしまうので、選択が図に掛かっているときは
      図を選ばずに、その文字列をコメント対象として残す */
+  /* 動画・音声の標準プレーヤーは、操作部の上の click をページ側へ流さない
+     （Chrome）。操作するとプレーヤーにフォーカスが移るので、そこで選ぶ */
+  function onFrameFocusIn(e) {
+    const player = e.target && e.target.closest &&
+      e.target.closest('video, audio');
+    if (!player || regionMode) return;
+    clearJumpHighlight();
+    selectedObj = player;
+    lastSel = null; // 文字列の選択よりプレーヤーを対象にする
+    for (const [cid, el] of objAnchors) {
+      if (el === player) { activateComment(cid, false); return; }
+    }
+    paintHighlights();
+  }
+
   function onFrameClick(e) {
     clearJumpHighlight();
     const doc = frameDoc();
@@ -472,7 +497,9 @@
         cid: newCid(), target: 'image', quote: label, image: label,
         image_ref: ref, element: selectedObj,
       };
-      showDraft('🖼 ' + label);
+      const tag = selectedObj.tagName.toLowerCase();
+      const icon = tag === 'video' ? '🎬' : tag === 'audio' ? '🔊' : '🖼';
+      showDraft(icon + ' ' + label);
       return;
     }
     captureSelection(); // 選択が残っていれば最新の内容に更新する

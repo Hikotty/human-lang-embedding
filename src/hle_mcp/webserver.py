@@ -22,7 +22,7 @@ import urllib.request
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from . import feedback, storage, versioning
 
@@ -38,12 +38,16 @@ _CONTENT_TYPES = {
     ".css": "text/css; charset=utf-8",
     ".js": "application/javascript; charset=utf-8",
     ".svg": "image/svg+xml",
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
+    # 添付メディア（画像・動画・音声）の型は storage.MEDIA_TYPES に一本化
+    **{ext: mime for ext, (_, mime) in storage.MEDIA_TYPES.items()},
 }
+# 添付メディアを送るときの1回の書き込み量
+_STREAM_CHUNK = 256 * 1024
+# ブラウザからの添付（生のバイト列）。Content-Type: application/octet-stream は
+# CORS の simple request に入らないので、他サイトのページからはプリフライト
+# なしに送れない（このサーバーは OPTIONS に応じない）。HTMLフォームでも
+# 送れない型なので、JSON と同じく CSRF の封じ込めになる
+_UPLOAD_CTYPE = "application/octet-stream"
 
 # ループバックを指す正当なホスト名。DNSリバインディング対策の許可リスト。
 _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]", "::1")
@@ -56,10 +60,11 @@ _SECURITY_HEADERS = (
 )
 
 # HTMLに与えるCSP。インラインscript/styleは使っていないので'self'のみで足りる。
+# media-src は本文に埋め込んだ動画・音声（同じオリジンの添付ファイル）のため
 _CSP_HTML = (
     "default-src 'none'; script-src 'self'; style-src 'self'; "
-    "img-src 'self' data:; connect-src 'self'; form-action 'none'; "
-    "base-uri 'none'; frame-ancestors 'none'"
+    "img-src 'self' data:; media-src 'self'; connect-src 'self'; "
+    "form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
 )
 # HTMLレビューページ用。レビュー対象HTMLを同一オリジンのiframeで埋め込むため
 # frame-src 'self' を許可する（それ以外は _CSP_HTML と同一）。
@@ -69,11 +74,12 @@ _CSP_HTML_REVIEW = (
     "form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
 )
 # iframe内に表示するレビュー対象HTML用。見た目の再現に必要なインラインCSSと
-# data:画像のみ許可し、スクリプトは一切許可しない（iframeのsandbox属性でも
-# 二重に遮断される）。frame-ancestors 'self' で自オリジンからの埋め込みのみ許可。
+# data:の画像・動画・音声のみ許可し、スクリプトは一切許可しない（iframeの
+# sandbox属性でも二重に遮断される）。frame-ancestors 'self' で自オリジンからの
+# 埋め込みのみ許可。
 _CSP_FRAME_DOC = (
     "default-src 'none'; style-src 'unsafe-inline'; "
-    "img-src 'self' data:; font-src data:; "
+    "img-src 'self' data:; media-src data:; font-src data:; "
     "form-action 'none'; base-uri 'none'; frame-ancestors 'self'"
 )
 # HTML以外（JSON・画像・静的アセット）はすべて禁止で足りる。
@@ -87,6 +93,45 @@ def build_version() -> str:
     知らせる（静的ファイルだけの変更でもページ側のJSは古いままなので）。
     """
     return f"{LOADED_VERSION}-{versioning.static_version()}"
+
+
+def _shutdown(conn: socket.socket) -> None:
+    try:
+        conn.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+
+
+def parse_range(header: str | None, size: int) -> tuple[int, int] | str | None:
+    """Range ヘッダを解釈して送る範囲 (先頭, 末尾) を返す（末尾を含む）。
+
+    - None: Range を使わず全体を 200 で返す（ヘッダなし、bytes 以外の単位、
+      書式の誤り、複数範囲）。RFC 9110 はこれらで Range を無視してよいとする
+    - "unsatisfiable": 範囲がファイルの外（416 で返す）
+    """
+    if not header:
+        return None
+    unit, _, spec = header.strip().partition("=")
+    if unit.strip().lower() != "bytes" or "," in spec:
+        return None
+    first, sep, last = spec.strip().partition("-")
+    first, last = first.strip(), last.strip()
+    if not sep or (first and not first.isdigit()) or (last and not last.isdigit()):
+        return None
+    if not first:
+        if not last:
+            return None
+        suffix = int(last)  # bytes=-N は末尾の N バイト
+        if suffix == 0 or size == 0:
+            return "unsatisfiable"
+        return max(size - suffix, 0), size - 1
+    start = int(first)
+    if start >= size:
+        return "unsatisfiable"
+    end = size - 1 if not last else min(int(last), size - 1)
+    if end < start:
+        return None
+    return start, end
 
 
 class _Server(ThreadingHTTPServer):
@@ -105,6 +150,9 @@ class _Server(ThreadingHTTPServer):
         self._cond = threading.Condition()
         self._inflight = 0
         self._conns: dict[socket.socket, bool] = {}  # 接続 -> 処理中か
+        # 動画・音声を送っている途中の接続。ブラウザは再生位置まで読むと
+        # 受信を止めるので、送信が何分も終わらないことがある
+        self._streams: set[socket.socket] = set()
         self.draining = False
         super().__init__(*args, **kwargs)
 
@@ -138,6 +186,25 @@ class _Server(ThreadingHTTPServer):
                     self._conns[conn] = False
                 self._cond.notify_all()
 
+    @contextmanager
+    def stream_scope(self, conn: socket.socket):
+        """メディアの送信中であることを示す。入れ替えではこの接続を待たずに切る。
+
+        メディアの取得は読み取りだけで、切られてもブラウザが続きを Range で
+        取り直すので、保存のように終わるまで待つ必要がない。送信がブラウザ
+        側の受信待ちで止まっていても、接続を切れば書き込みが例外で戻る。
+        """
+        with self._cond:
+            self._streams.add(conn)
+            cut = self.draining
+        if cut:
+            _shutdown(conn)
+        try:
+            yield
+        finally:
+            with self._cond:
+                self._streams.discard(conn)
+
     def close_all(self) -> None:
         """接続をすべて切る（keep-alive の処理スレッドを残さない）。"""
         with self._cond:
@@ -152,12 +219,11 @@ class _Server(ThreadingHTTPServer):
         """処理中のリクエストが終わるまで待つ。serve_forever を止めてから呼ぶ。"""
         with self._cond:
             self.draining = True
+            # 待機中の keep-alive 接続と、メディアを送っている途中の接続は切る
             idle = [c for c, busy in self._conns.items() if not busy]
+            idle += list(self._streams)
         for c in idle:
-            try:
-                c.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
+            _shutdown(c)
         deadline = time.monotonic() + timeout
         with self._cond:
             while self._inflight > 0:
@@ -211,7 +277,8 @@ class _Handler(BaseHTTPRequestHandler):
         - Origin: 状態変更系で自オリジン以外を拒否する（CSRF対策）
           ※ Originを送らないローカルCLIやテストは許可する。CSRFはブラウザ
             由来の脅威であり、ローカルプロセスはデータを直読できるため。
-        - Content-Type: POSTはapplication/json必須（simple requestの封じ込め）
+        - Content-Type: POSTはapplication/json必須（simple requestの封じ込め）。
+          メディアの添付（/files）だけは application/octet-stream 必須
         """
         host = (self.headers.get("Host") or "").strip().lower()
         if not host or host not in self._allowed_hosts():
@@ -222,9 +289,13 @@ class _Handler(BaseHTTPRequestHandler):
         if origin and origin.lower() not in self._allowed_origins():
             return f"許可されないOriginです: {origin}"
         ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-        if ctype != "application/json":
+        # メディアの添付だけは生のバイト列で受ける。どちらの型も simple
+        # request では送れないので、他サイトからの書き込みは同じく塞がる
+        parts = [p for p in urlparse(self.path).path.split("/") if p]
+        expected = _UPLOAD_CTYPE if _is_upload_path(parts) else "application/json"
+        if ctype != expected:
             return (
-                "Content-Type に application/json を指定してください: "
+                f"Content-Type に {expected} を指定してください: "
                 f"{ctype or '(なし)'}"
             )
         return None
@@ -240,19 +311,19 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json({"error": reason}, 403)
 
     # ---------- 共通レスポンス ----------
-    def _emit(
-        self, body: bytes, ctype: str, status: int, csp: str,
-        frameable: bool = False,
+    def _send_head(
+        self, ctype: str, length: int, status: int, csp: str,
+        frameable: bool = False, extra: tuple[tuple[str, str], ...] = (),
     ) -> None:
-        """レスポンスを送出する。frameable は同一オリジンのiframe埋め込みを
-        許可する（HTMLレビューの対象ドキュメント配信でのみ使う）。"""
+        """ステータス行と共通ヘッダを送る。frameable は同一オリジンのiframe
+        埋め込みを許可する（HTMLレビューの対象ドキュメント配信でのみ使う）。"""
         # 入れ替えで止まる途中のワーカーは、応答後に接続を閉じて
         # ブラウザを新しいワーカーへ張り直させる
         if getattr(self.server, "draining", False):
             self.close_connection = True
         self.send_response(status)
         self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Length", str(length))
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Security-Policy", csp)
         self.send_header("X-HLE-Version", build_version())
@@ -260,9 +331,18 @@ class _Handler(BaseHTTPRequestHandler):
             if frameable and name == "X-Frame-Options":
                 value = "SAMEORIGIN"
             self.send_header(name, value)
+        for name, value in extra:
+            self.send_header(name, value)
         if self.close_connection:
             self.send_header("Connection", "close")
         self.end_headers()
+
+    def _emit(
+        self, body: bytes, ctype: str, status: int, csp: str,
+        frameable: bool = False,
+    ) -> None:
+        """レスポンスを送出する。"""
+        self._send_head(ctype, len(body), status, csp, frameable)
         self.wfile.write(body)
 
     def _send_json(self, obj, status: int = 200) -> None:
@@ -288,6 +368,59 @@ class _Handler(BaseHTTPRequestHandler):
             200,
             csp,
         )
+
+    def _send_media(self, path: Path) -> None:
+        """添付ファイル（画像・動画・音声）を Range 付きで分割して送る。
+
+        動画・音声の要素は Range で必要な所だけを取り、シークもそれで行う。
+        Safari は Range に 206 で応えないサーバーの動画を再生しない。
+        """
+        size = path.stat().st_size
+        ctype = _CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream")
+        rng = parse_range(self.headers.get("Range"), size)
+        if rng == "unsatisfiable":
+            self._send_head(
+                "application/json; charset=utf-8", 0, 416, _CSP_STRICT,
+                extra=(("Accept-Ranges", "bytes"),
+                       ("Content-Range", f"bytes */{size}")),
+            )
+            return
+        if rng is None:
+            start, end, status, extra = 0, size - 1, 200, ()
+        else:
+            start, end = rng
+            status = 206
+            extra = (("Content-Range", f"bytes {start}-{end}/{size}"),)
+        length = end - start + 1
+        with path.open("rb") as f, self._stream_scope():
+            f.seek(start)
+            remaining = length
+            try:
+                self._send_head(
+                    ctype, length, status, _CSP_STRICT,
+                    extra=(("Accept-Ranges", "bytes"),) + extra,
+                )
+                while remaining > 0:
+                    chunk = f.read(min(remaining, _STREAM_CHUNK))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+            except OSError:
+                # ブラウザが途中で取りやめた（シーク・ページ移動）か、入れ替えで
+                # 切った。応答の途中なので、この接続はもう使えない
+                self.close_connection = True
+                return
+            if remaining > 0:  # 送る途中でファイルが縮んだ
+                self.close_connection = True
+
+    @contextmanager
+    def _stream_scope(self):
+        if isinstance(self.server, _Server):
+            with self.server.stream_scope(self.connection):
+                yield
+        else:
+            yield
 
     def _drain_body(self) -> None:
         """拒否したPOSTのボディを読み捨てて接続の同期を保つ。"""
@@ -353,6 +486,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_file(_STATIC_DIR / name)
         elif parsed.path == "/api/health":
             self._send_json(health_payload())
+        elif parsed.path == "/api/media":
+            # 添付できる形式と上限。エディタがファイル選択の絞り込みと、
+            # 送る前の確認（大きすぎるファイルを送り始めない）に使う
+            self._send_json(storage.media_config())
         elif len(parts) == 4 and parts[:2] == ["api", "sessions"] \
                 and parts[3] == "source":
             # HTMLレビューの対象ドキュメント。iframeから読み込まれる。
@@ -369,7 +506,7 @@ class _Handler(BaseHTTPRequestHandler):
         elif len(parts) == 5 and parts[:2] == ["api", "sessions"] \
                 and parts[3] == "files":
             storage.load_session(parts[2])  # 存在確認
-            self._send_file(storage.get_image_path(parts[2], unquote(parts[4])))
+            self._send_media(storage.get_image_path(parts[2], unquote(parts[4])))
         elif len(parts) == 4 and parts[:2] == ["api", "sessions"] \
                 and parts[3] == "feedback":
             self._send_json(feedback.build_feedback(storage.load_session(parts[2])))
@@ -414,11 +551,15 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_error_json(500, f"サーバーエラー: {e}")
 
     def _route_post(self) -> None:
-        parts = [p for p in urlparse(self.path).path.split("/") if p]
+        parsed = urlparse(self.path)
+        parts = [p for p in parsed.path.split("/") if p]
         if len(parts) < 4 or parts[:2] != ["api", "sessions"]:
             self._send_error_json(404, "不明なパスです")
             return
         sid = parts[2]
+        if _is_upload_path(parts):
+            self._receive_upload(sid, parsed.query)
+            return
         body = self._read_body_json()
         if parts[3] == "document" and len(parts) == 4:
             rev = body.get("revision")
@@ -501,11 +642,54 @@ class _Handler(BaseHTTPRequestHandler):
             except Exception as e:  # noqa: BLE001
                 raise ValueError(f"base64のデコードに失敗しました: {e}") from e
             name = storage.save_image_bytes(sid, str(body.get("name", "")), data)
-            self._send_json(
-                {"name": name, "url": f"/api/sessions/{sid}/files/{name}"}
-            )
+            self._send_json(_saved_media(sid, name))
         else:
             self._send_error_json(404, "不明なパスです")
+
+    def _receive_upload(self, sid: str, query: str) -> None:
+        """ブラウザから添付されたメディアを、ボディのまま分割して保存する。
+
+        POST /api/sessions/<ID>/files?name=<ファイル名>（application/octet-stream）。
+        JSON+base64 だと 4/3 倍に膨らみ、全体をメモリに載せることになるので、
+        動画のような大きなファイルはこちらで受ける。受け取る前に形式と
+        Content-Length の上限を確かめ、断るときはボディを読み切らずに閉じる。
+        """
+        name = (parse_qs(query).get("name") or [""])[0]
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        try:
+            storage.load_session(sid)  # 存在確認
+            safe = storage.sanitize_image_name(name)
+            if length <= 0:
+                raise ValueError("ファイルが空です（Content-Length が必要です）")
+            storage.check_media_size(safe, length)
+        except (KeyError, ValueError):
+            self._drain_body()
+            raise
+        try:
+            saved = storage.save_media_stream(sid, name, self.rfile, length)
+        except Exception:
+            # ボディを読む途中で失敗したので、この接続の続きは読めない
+            self.close_connection = True
+            raise
+        self._send_json(_saved_media(sid, saved))
+
+
+def _is_upload_path(parts: list[str]) -> bool:
+    """POST /api/sessions/<ID>/files（生のバイト列でのメディア添付）か。"""
+    return len(parts) == 4 and parts[:2] == ["api", "sessions"] \
+        and parts[3] == "files"
+
+
+def _saved_media(sid: str, name: str) -> dict:
+    return {
+        "name": name,
+        # 保存名は日本語を含みうるので、URL ではパーセントエンコードする
+        "url": f"/api/sessions/{sid}/files/{quote(name)}",
+        "kind": storage.media_kind(name),
+    }
 
 
 def _decode_png_base64(value) -> bytes:
@@ -770,7 +954,7 @@ def self_test() -> None:
     thread.start()
     try:
         base = f"http://127.0.0.1:{srv.server_address[1]}"
-        paths = ["/api/health", "/", "/admin", "/static/app.js",
+        paths = ["/api/health", "/api/media", "/", "/admin", "/static/app.js",
                  "/static/tracker.js", "/api/sessions?limit=1"]
         with _LOCAL.open(base + paths[-1], timeout=10) as res:
             sessions = json.loads(res.read().decode("utf-8"))["sessions"]

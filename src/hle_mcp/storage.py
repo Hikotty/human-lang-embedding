@@ -6,8 +6,10 @@ ID・タイトル・ワークスペースでの検索を提供する。
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import os
 import re
 import threading
 import uuid
@@ -16,6 +18,16 @@ from pathlib import Path
 from typing import Any
 
 from . import versioning
+from .media import (  # noqa: F401  storage 経由でも使えるように再公開する
+    MAX_MEDIA_BYTES,
+    MEDIA_LABELS,
+    MEDIA_TYPES,
+    check_media_size,
+    media_config,
+    media_kind,
+    media_label,
+    supported_summary,
+)
 
 _LOCK = threading.RLock()
 
@@ -667,13 +679,20 @@ def delete_reply(
         return comment
 
 
-# ---------- 画像ファイル ----------
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
-MAX_IMAGE_BYTES = 10 * 1024 * 1024
+# ---------- 添付メディア（画像・動画・音声） ----------
+# 形式と上限の定義は media.py。ここではファイルの保存・一覧・取り出しを扱う。
+# 上限は保存のたびに media.MAX_MEDIA_BYTES を引く（テストで差し替えられる）
+# 旧名（画像だけを扱っていた頃の定数）。中身はメディア全体に広げてある
+IMAGE_EXTS = set(MEDIA_TYPES)
+MAX_IMAGE_BYTES = MAX_MEDIA_BYTES["image"]
+_COPY_CHUNK = 1024 * 1024
+# 書き込み途中の一時ファイル。保存名は sanitize で "." 始まりにならないので
+# 一覧と配信から確実に外せる
+_PART_PREFIX = ".upload-"
 
 
 def files_dir(session_id: str) -> Path:
-    """セッションに紐づく画像ファイルの保存ディレクトリ。"""
+    """セッションに紐づく添付ファイル（画像・動画・音声）の保存ディレクトリ。"""
     if not re.fullmatch(_ID_PATTERN, session_id):
         raise KeyError(f"不正なセッションID: {session_id!r}")
     d = data_dir() / "files" / session_id
@@ -682,57 +701,145 @@ def files_dir(session_id: str) -> Path:
 
 
 def sanitize_image_name(name: str) -> str:
-    """ファイル名を安全な形に正規化する（拡張子は許可制）。"""
+    """ファイル名を安全な形に正規化する（拡張子は MEDIA_TYPES の許可制）。"""
     base = Path(str(name)).name
     ext = Path(base).suffix.lower()
-    if ext not in IMAGE_EXTS:
+    if ext not in MEDIA_TYPES:
         raise ValueError(
-            f"対応していない画像形式です: {ext or '(拡張子なし)'} "
-            f"(対応: {', '.join(sorted(IMAGE_EXTS))})"
+            f"対応していない形式です: {ext or '(拡張子なし)'} "
+            f"(対応: {supported_summary()})"
         )
     stem = re.sub(r"[^\w\-]", "_", Path(base).stem, flags=re.UNICODE)[:60]
-    return (stem or "image") + ext
+    return (stem or (media_kind(base) or "image")) + ext
+
+
+def _sha256_of(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(_COPY_CHUNK), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _fill_from(read, name: str, length: int | None):
+    """read(n) の中身を一時ファイルへ書き写す関数を作る。
+
+    length を渡したらちょうどその長さを読む（HTTP のボディ）。渡さなければ
+    read が空を返すまで読む（ローカルファイル）。上限を超えたら ValueError。
+    """
+    def fill(dest: Path) -> tuple[int, str]:
+        h = hashlib.sha256()
+        size = 0
+        with dest.open("wb") as out:
+            while True:
+                want = _COPY_CHUNK if length is None else min(_COPY_CHUNK, length - size)
+                if want <= 0:
+                    break
+                chunk = read(want)
+                if not chunk:
+                    if length is not None:
+                        raise ValueError("データが途中で途切れました")
+                    break
+                size += len(chunk)
+                check_media_size(name, size)
+                h.update(chunk)
+                out.write(chunk)
+        return size, h.hexdigest()
+
+    return fill
+
+
+def _store_media(session_id: str, name: str, fill, reuse_same: bool) -> str:
+    """一時ファイルに書いてから保存名を決めて置く。実際の保存名を返す。
+
+    同名があれば stem-1.ext, stem-2.ext と連番を振る。reuse_same のときは
+    中身が同じ既存ファイルがあればそれを使い、複製を作らない（同じ動画を
+    稿ごとに渡し直しても、そのたびにコピーが増えないようにする）。
+    """
+    safe = sanitize_image_name(name)
+    d = files_dir(session_id)
+    tmp = d / f"{_PART_PREFIX}{uuid.uuid4().hex}.part"
+    try:
+        size, digest = fill(tmp)
+        if size == 0:
+            raise ValueError("ファイルが空です")
+        with _LOCK:
+            stem, ext = Path(safe).stem, Path(safe).suffix
+            candidate, counter = safe, 1
+            while (d / candidate).exists():
+                if (reuse_same and (d / candidate).stat().st_size == size
+                        and _sha256_of(d / candidate) == digest):
+                    return candidate
+                candidate = f"{stem}-{counter}{ext}"
+                counter += 1
+            os.replace(tmp, d / candidate)
+            return candidate
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def save_image_bytes(session_id: str, name: str, data: bytes) -> str:
-    """画像バイト列を保存し、実際に保存されたファイル名を返す。"""
+    """メディアのバイト列を保存し、実際に保存されたファイル名を返す。
+
+    同名があれば中身に関わらず連番の別名で保存する（範囲コメントの
+    スクリーンショットはコメントと1対1で、消すときに他を巻き込まないように）。
+    """
     if not data:
-        raise ValueError("画像データが空です")
-    if len(data) > MAX_IMAGE_BYTES:
-        raise ValueError("画像サイズは10MB以下にしてください")
-    safe = sanitize_image_name(name)
-    with _LOCK:
-        d = files_dir(session_id)
-        candidate = safe
-        stem, ext = Path(safe).stem, Path(safe).suffix
-        counter = 1
-        while (d / candidate).exists():
-            candidate = f"{stem}-{counter}{ext}"
-            counter += 1
-        (d / candidate).write_bytes(data)
-        return candidate
+        raise ValueError("ファイルが空です")
+    check_media_size(sanitize_image_name(name), len(data))
+    view = memoryview(data)
+    pos = 0
+
+    def read(n: int) -> bytes:
+        nonlocal pos
+        chunk = view[pos:pos + n].tobytes()
+        pos += len(chunk)
+        return chunk
+
+    return _store_media(
+        session_id, name, _fill_from(read, name, len(data)), reuse_same=False
+    )
+
+
+def save_media_stream(session_id: str, name: str, stream, length: int) -> str:
+    """HTTP のボディなど、長さの分かっているストリームを分割して保存する。"""
+    if length <= 0:
+        raise ValueError("ファイルが空です")
+    check_media_size(sanitize_image_name(name), length)
+    return _store_media(
+        session_id, name, _fill_from(stream.read, name, length), reuse_same=False
+    )
 
 
 def add_image_file(session_id: str, source_path: str) -> str:
-    """ローカルの画像ファイルをセッションにコピーして保存名を返す。"""
+    """ローカルのメディアファイルをセッションにコピーして保存名を返す。
+
+    中身が同じファイルを保存済みなら、その名前を返してコピーしない。
+    """
     p = Path(source_path).expanduser()
     if not p.is_file():
-        raise ValueError(f"画像ファイルが見つかりません: {source_path}")
-    return save_image_bytes(session_id, p.name, p.read_bytes())
+        raise ValueError(f"ファイルが見つかりません: {source_path}")
+    check_media_size(sanitize_image_name(p.name), p.stat().st_size)
+    with p.open("rb") as f:
+        return _store_media(
+            session_id, p.name, _fill_from(f.read, p.name, None), reuse_same=True
+        )
 
 
 def get_image_path(session_id: str, name: str) -> Path:
-    """保存済み画像のパスを返す（存在しなければ KeyError）。"""
+    """保存済みファイルのパスを返す（存在しなければ KeyError）。"""
     safe = Path(str(name)).name
     path = files_dir(session_id) / safe
-    if not path.is_file():
-        raise KeyError(f"画像が見つかりません: {name}")
+    if safe.startswith(".") or not path.is_file():
+        raise KeyError(f"ファイルが見つかりません: {name}")
     return path
 
 
 def list_images(session_id: str) -> list[str]:
+    """保存済みの添付ファイル名（書き込み途中の一時ファイルは除く）。"""
     return sorted(
-        p.name for p in files_dir(session_id).iterdir() if p.is_file()
+        p.name for p in files_dir(session_id).iterdir()
+        if p.is_file() and not p.name.startswith(".")
     )
 
 

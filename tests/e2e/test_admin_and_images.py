@@ -49,8 +49,8 @@ def test_image_tracked_delete_and_undo_toggle(image_review):
     assert para.get_attribute("data-del") == "1"
     wait_saved(page)
     fb = feedback.build_feedback(storage.load_session(sid))
-    assert {"type": "image_delete", "paragraph": 1, "text": "zu1.png"} \
-        in fb["changes"]
+    assert {"type": "image_delete", "paragraph": 1, "text": "zu1.png",
+            "kind": "image"} in fb["changes"]
     assert fb["result_text"] == "画像の説明文です。"
     assert "![構成図](zu1.png)" in fb["original_text"]
 
@@ -105,7 +105,7 @@ def test_human_inserts_image_via_button(image_review, tmp_path):
     wait_saved(page)
     fb = feedback.build_feedback(storage.load_session(sid))
     assert {"type": "image_insert", "paragraph": 1,
-            "text": "screenshot.png"} in fb["changes"]
+            "text": "screenshot.png", "kind": "image"} in fb["changes"]
     assert "![](screenshot.png)" in fb["result_text"]
     assert "screenshot.png" not in fb["original_text"]
 

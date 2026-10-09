@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from hle_mcp import feedback, storage
 
 
@@ -198,7 +200,8 @@ def test_image_paragraph_deleted():
     assert result == "前"               # 校正後は行ごと消える
     assert annotated == "前\n【画像削除:a.png】"
     assert changes == [
-        {"type": "image_delete", "paragraph": 1, "text": "a.png"}]
+        {"type": "image_delete", "paragraph": 1, "text": "a.png",
+         "kind": "image"}]
 
 
 def test_image_paragraph_inserted():
@@ -208,7 +211,64 @@ def test_image_paragraph_inserted():
     assert result == "前\n![](new.png)\n後"
     assert annotated == "前\n【画像追加:new.png】\n後"
     assert changes == [
-        {"type": "image_insert", "paragraph": 1, "text": "new.png"}]
+        {"type": "image_insert", "paragraph": 1, "text": "new.png",
+         "kind": "image"}]
+
+
+@pytest.mark.parametrize(("name", "kind", "label"), [
+    ("clip.mp4", "video", "動画"),
+    ("screen.MOV", "video", "動画"),
+    ("demo.webm", "video", "動画"),
+    ("voice.mp3", "audio", "音声"),
+    ("memo.m4a", "audio", "音声"),
+    ("anim.gif", "image", "画像"),
+])
+def test_media_paragraph_labels_by_kind(name, kind, label):
+    """動画・音声の削除指定と追加は、注釈と changes で種類が分かる。"""
+    html = ("<p>前</p>" + _img_para(name, f"![説明]({name})", del_=True)
+            + _img_para("add-" + name, ins=True))
+    orig, result, annotated, changes = _texts(html)
+    assert orig == f"前\n![説明]({name})"
+    assert result == f"前\n![](add-{name})"
+    assert annotated == f"前\n【{label}削除:{name}】\n【{label}追加:add-{name}】"
+    assert changes == [
+        {"type": "image_delete", "paragraph": 1, "text": name, "kind": kind},
+        {"type": "image_insert", "paragraph": 2, "text": "add-" + name,
+         "kind": kind},
+    ]
+
+
+def test_media_paragraph_with_player_markup_round_trips():
+    """エディタが描く <video>/<audio> の中身は逆変換に混ざらない。"""
+    html = (
+        "<p>前</p>"
+        '<p class="img-para" contenteditable="false" data-img="clip.webm" '
+        'data-md="![デモ](clip.webm)" data-kind="video"><video controls="" '
+        'preload="metadata" playsinline="" src="/api/sessions/x/files/clip.webm" '
+        'aria-label="clip.webm"></video><span class="img-caption">clip.webm'
+        "</span></p>"
+        '<p class="img-para" contenteditable="false" data-img="a.mp3" '
+        'data-md="![](a.mp3)" data-kind="audio" data-cids="c1"><audio '
+        'controls="" preload="metadata" src="/x/a.mp3"></audio>'
+        '<span class="img-caption">a.mp3</span></p>'
+    )
+    orig, result, annotated, changes = _texts(html, {"c1": 1})
+    assert orig == result == "前\n![デモ](clip.webm)\n![](a.mp3)"
+    assert annotated == "前\n![デモ](clip.webm)\n〖C1〗![](a.mp3)〖/C1〗"
+    assert changes == []
+
+
+def test_comment_view_exposes_media_kind():
+    """mdモードのメディアへのコメントは kind で種類が分かる。"""
+    s = storage.create_session("本文\n![](clip.mp4)", "動画コメント", "/tmp/x")
+    storage.add_comment(s["id"], quote="![](clip.mp4)", text="冒頭を切って",
+                        target="image", image="clip.mp4")
+    storage.add_comment(s["id"], quote="![](a.mp3)", text="音量を上げて",
+                        target="image", image="a.mp3")
+    storage.add_comment(s["id"], quote="![](a.png)", text="図を直して",
+                        target="image", image="a.png")
+    cs = feedback.build_feedback(storage.load_session(s["id"]))["comments"]
+    assert [c["kind"] for c in cs] == ["video", "audio", "image"]
 
 
 def test_image_alt_text_content_ignored():

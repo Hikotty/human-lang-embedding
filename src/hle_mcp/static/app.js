@@ -85,18 +85,32 @@
     const rev = session.revisions[session.revisions.length - 1];
     revIndex = rev.index;
     const initialHtml = await takeBackup(rev);
+    // 本文の ![](名前) を画像・動画・音声に描き分けるので、形式の表を先に取る
+    await loadMediaConfig();
     Tracker.init($('#editor'), rev.base_text, initialHtml.html, onEdited,
-      { sessionId: sid, onImageFile: handleImageFile,
-        onImageCommentsDropped: dropImageComments });
+      { sessionId: sid, onImageFile: handleMediaFiles,
+        onImageCommentsDropped: dropImageComments, mediaKind: mediaKind });
     renderMeta();
     renderComments();
     $('#btn-update-reload').addEventListener('click', reloadForUpdate);
     $('#btn-image').addEventListener('click', () => $('#image-input').click());
     $('#image-input').addEventListener('change', (e) => {
       if (e.target.files && e.target.files.length) {
-        handleImageFile(e.target.files[0]);
+        handleMediaFiles(Array.from(e.target.files), null);
         e.target.value = '';
       }
+    });
+    // 本文の外にファイルを落としてもページを離れない（ブラウザの既定は
+    // そのファイルを開く）。本文の上へのドロップは Tracker が添付として受ける
+    ['dragover', 'drop'].forEach((type) => {
+      window.addEventListener(type, (e) => {
+        const types = e.dataTransfer ? e.dataTransfer.types : null;
+        if (types && Array.prototype.indexOf.call(types, 'Files') >= 0 &&
+            !e.defaultPrevented) {
+          e.preventDefault();
+          if (type === 'dragover') e.dataTransfer.dropEffect = 'none';
+        }
+      });
     });
     $('#btn-comment').addEventListener('click', startCommentDraft);
     $('#btn-undo').addEventListener('click', () => Tracker.undo());
@@ -317,27 +331,119 @@
     el.classList.toggle('warn', !!warn);
   }
 
-  /* ---------- 画像 ---------- */
-  async function handleImageFile(file) {
-    if (!file || file.type.indexOf('image/') !== 0) {
-      alert('画像ファイルを指定してください');
-      return;
-    }
+  /* ---------- メディア（画像・動画・音声） ----------
+     受け付ける形式と上限はサーバー（/api/media）が持つ。取れなかったときは
+     画像だけを受け付ける（サーバー側でも同じ確認をする） */
+  const MEDIA_ICONS = { image: '🖼', video: '🎬', audio: '🔊' };
+  const FALLBACK_MEDIA = {
+    types: { '.png': { kind: 'image', mime: 'image/png' },
+      '.jpg': { kind: 'image', mime: 'image/jpeg' },
+      '.jpeg': { kind: 'image', mime: 'image/jpeg' },
+      '.gif': { kind: 'image', mime: 'image/gif' },
+      '.webp': { kind: 'image', mime: 'image/webp' } },
+    max_bytes: { image: 10 * 1024 * 1024 },
+    labels: { image: '画像' },
+  };
+  let mediaConf = FALLBACK_MEDIA;
+
+  async function loadMediaConfig() {
     try {
-      const dataUrl = await new Promise((resolve, reject) => {
-        const fr = new FileReader();
-        fr.onload = () => resolve(fr.result);
-        fr.onerror = () => reject(new Error('読み込み失敗'));
-        fr.readAsDataURL(file);
-      });
-      const base64 = String(dataUrl).split(',', 2)[1] || '';
-      const res = await api('/api/sessions/' + sid + '/images', 'POST',
-        { name: file.name || 'pasted.png', data_base64: base64 });
-      Tracker.insertImageParagraph(res.name);
-      onEdited();
+      mediaConf = await api('/api/media');
     } catch (e) {
-      alert('画像の追加に失敗しました: ' + e.message);
+      mediaConf = FALLBACK_MEDIA;
     }
+    const input = $('#image-input');
+    if (input) input.accept = Object.keys(mediaConf.types).join(',');
+  }
+
+  function extOf(name) {
+    const m = /\.[^./\\]+$/.exec(String(name || ''));
+    return m ? m[0].toLowerCase() : '';
+  }
+
+  function mediaKind(name) {
+    const t = mediaConf.types[extOf(name)];
+    return t ? t.kind : null;
+  }
+
+  function mediaIcon(name) {
+    return MEDIA_ICONS[mediaKind(name) || 'image'];
+  }
+
+  function sizeText(n) {
+    return n >= 1024 * 1024 * 1024
+      ? +(n / (1024 * 1024 * 1024)).toPrecision(3) + 'GB'
+      : +(n / (1024 * 1024)).toPrecision(3) + 'MB';
+  }
+
+  /* 貼り付けた画像には名前が無い（または image.png）ので、MIME から拡張子を補う */
+  function uploadName(file) {
+    const name = file.name || '';
+    if (mediaKind(name)) return name;
+    const sub = String(file.type || '').split('/')[1] || '';
+    const ext = Object.keys(mediaConf.types).find(
+      (x) => mediaConf.types[x].mime === file.type) || ('.' + sub);
+    return (name.replace(/\.[^.]*$/, '') || 'pasted') + ext;
+  }
+
+  /* 送る前に形式と大きさを確かめる。大きすぎるファイルを送り始めると、
+     サーバーが断っても送信の途中で接続が切れて理由が伝わらないため */
+  function mediaProblem(file, name) {
+    const kind = mediaKind(name);
+    if (!kind) {
+      const exts = Object.keys(mediaConf.types).join(' ');
+      return '対応していない形式です: ' + (file.name || file.type || '(不明)') +
+        '\n対応: ' + exts;
+    }
+    const limit = mediaConf.max_bytes[kind];
+    if (limit && file.size > limit) {
+      return (mediaConf.labels[kind] || kind) + 'は' + sizeText(limit) +
+        '以下にしてください（' + (file.name || name) + ': ' +
+        sizeText(file.size) + '）';
+    }
+    return '';
+  }
+
+  /* ファイル（貼り付け・ドロップ・🖼ボタン）を添付し、本文に段落として入れる。
+     after を渡されたらその段落の後ろから順に、渡されなければキャレットの
+     段落の後ろから順に並べる */
+  async function handleMediaFiles(files, after) {
+    const list = Array.from(files || []);
+    const problems = [];
+    const ok = [];
+    list.forEach((f) => {
+      const name = uploadName(f);
+      const why = mediaProblem(f, name);
+      if (why) problems.push(why); else ok.push({ file: f, name: name });
+    });
+    if (problems.length) alert(problems.join('\n\n'));
+    let anchor = after || null;
+    for (const item of ok) {
+      toast(mediaIcon(item.name) + ' ' + item.name + ' を追加しています…');
+      try {
+        const res = await uploadMedia(item.file, item.name);
+        anchor = Tracker.insertImageParagraph(res.name, anchor);
+        onEdited();
+        toast(mediaIcon(res.name) + ' ' + res.name + ' を追加しました');
+      } catch (e) {
+        alert('「' + item.name + '」の追加に失敗しました: ' + e.message);
+      }
+    }
+  }
+
+  /* ファイルの中身をそのままボディで送る（base64 にしないので大きな動画でも
+     メモリと時間を倍にしない） */
+  async function uploadMedia(file, name) {
+    const res = await fetch('/api/sessions/' + encodeURIComponent(sid) +
+      '/files?name=' + encodeURIComponent(name), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: file,
+    });
+    noteServerVersion(res.headers.get('X-HLE-Version'));
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+    return data;
   }
 
   /* ---------- コメント ---------- */
@@ -346,15 +452,15 @@
       Math.random().toString(36).slice(2, 6);
   }
 
-  /* テキストの選択範囲、または選択中の画像にコメントを付ける。
-     画像はドラッグ選択できないので、クリックで選んだ画像を対象にする。 */
+  /* テキストの選択範囲、または選択中のメディア（画像・動画・音声）にコメントを
+     付ける。メディアはドラッグ選択できないので、クリックで選んだものを対象にする。 */
   function startCommentDraft() {
     const r = Tracker.getRange();
     const hasRange = !!r && !r.collapsed;
     const img = hasRange ? null : Tracker.getSelectedImage();
     if (!hasRange && !img) {
       alert('コメントを付けたい範囲をドラッグで選択するか、\n' +
-        '画像をクリックして選択してください');
+        '画像・動画・音声をクリックして選択してください');
       return;
     }
     if (draftCid) cancelDraft();
@@ -362,7 +468,7 @@
     if (img) {
       if (!Tracker.addImageComment(cid)) return;
       draftTarget = { target: 'image', quote: img.md, image: img.name };
-      showDraft(cid, '🖼 ' + img.name);
+      showDraft(cid, MEDIA_ICONS[img.kind || 'image'] + ' ' + img.name);
     } else {
       // AI差分の幽霊テキスト（.ai-del）と改行マーカーは引用に含めない
       const box = document.createElement('div');
@@ -527,8 +633,14 @@
     if (c.target === 'image' && c.image) {
       const url = '/api/sessions/' + encodeURIComponent(sid) +
         '/files/' + encodeURIComponent(c.image);
+      // 動画・音声はカードを描き直すたびに読み込ませないよう、絵文字で示す
+      const kind = mediaKind(c.image) || 'image';
+      const thumb = kind === 'image'
+        ? '<img src="' + esc(url) + '" alt="">'
+        : '<span class="media-icon" aria-hidden="true">' + MEDIA_ICONS[kind] +
+          '</span>';
       return '<div class="quote img-quote" title="クリックで本文の位置へ">' +
-        '<img src="' + esc(url) + '" alt=""><span>C' + n + ': ' +
+        thumb + '<span>C' + n + ': ' +
         esc(c.image) + '</span>' + revNote(c) + '</div>';
     }
     // 引用は1行で省略表示されるので、稿の注記は先頭側に置いて隠れないようにする
@@ -738,7 +850,11 @@
       const p = Array.prototype.find.call(
         document.querySelectorAll('#editor .img-para'),
         (el) => el.dataset.img === c.image);
-      if (!p) { toast('この画像は今の本文にありません'); return; }
+      if (!p) {
+        const label = mediaConf.labels[mediaKind(c.image) || 'image'] || '画像';
+        toast('この' + label + 'は今の本文にありません');
+        return;
+      }
       p.classList.add('cmt-active');
       p.scrollIntoView({ behavior: 'smooth', block: 'center' });
       return;

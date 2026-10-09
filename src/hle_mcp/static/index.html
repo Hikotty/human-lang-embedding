@@ -19,9 +19,9 @@
               title="前の稿からAIが変えた箇所を青で表示する（削除は取り消し線、追加は青字）">🔵 AI差分</button>
       <button id="btn-undo" title="元に戻す (Cmd+Z)">↩ 元に戻す</button>
       <button id="btn-redo" title="やり直す (Cmd+Shift+Z)">↪ やり直す</button>
-      <button id="btn-image" title="カーソル位置に画像を追加する">🖼 画像</button>
-      <input type="file" id="image-input" accept="image/png,image/jpeg,image/gif,image/webp" hidden>
-      <button id="btn-comment" title="選択範囲、またはクリックで選んだ画像にコメントを付ける">💬 コメント</button>
+      <button id="btn-image" title="カーソル位置に画像・動画・音声を追加する（本文へのドロップ・貼り付けでも追加できる）">🖼 メディア</button>
+      <input type="file" id="image-input" accept="image/*,video/*,audio/*" multiple hidden>
+      <button id="btn-comment" title="選択範囲、またはクリックで選んだ画像・動画・音声にコメントを付ける">💬 コメント</button>
       <button id="btn-complete">✔ 校正完了</button>
       <a class="nav-link" href="/admin" title="全セッションの校正結果を見る">管理画面</a>
     </div>

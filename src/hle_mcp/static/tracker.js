@@ -7,7 +7,9 @@
  *   改行追加    : <ins class="pb" data-pb="ins">¶</ins>（段落末尾）
  *   改行削除    : <del class="pb" data-pb="del">¶</del>（段落末尾）
  *   コメント範囲: <span class="cmt" data-cid="...">
- *   画像コメント: <p class="img-para" data-cids="cid1 cid2">
+ *   メディア段落: <p class="img-para" data-img="名前" data-kind="image|video|audio">
+ *                 （中身は <img> / <video controls> / <audio controls>）
+ *   メディアへのコメント: <p class="img-para" data-cids="cid1 cid2">
  */
 (function () {
   'use strict';
@@ -17,7 +19,10 @@
   let sessionId = '';
   let onImageFileCb = null;
   let onImageCommentsDroppedCb = null;
-  let selectedImg = null; // 選択中の画像段落
+  // ファイル名 → 'image' | 'video' | 'audio'。形式の定義はサーバー（/api/media）
+  // にあり、app.js が受け取って渡す
+  let mediaKindFn = () => null;
+  let selectedImg = null; // 選択中のメディア段落（画像・動画・音声）
   const undoStack = [];
   const redoStack = [];
   const MAX_UNDO = 200;
@@ -717,9 +722,11 @@
       case 'insertFromPaste': {
         e.preventDefault();
         const dt = e.dataTransfer || (e.clipboardData || null);
-        if (dt && dt.files && dt.files.length &&
-            dt.files[0].type.indexOf('image/') === 0) {
-          if (onImageFileCb) onImageFileCb(dt.files[0]);
+        // 画像・動画・音声のファイルの貼り付けは添付として扱う（形式と大きさの
+        // 確認は app.js が行う）。それ以外のファイルは従来どおり文字として貼る
+        const files = dt && dt.files ? Array.from(dt.files) : [];
+        if (files.some(isMediaFile)) {
+          if (onImageFileCb) onImageFileCb(files, null);
           break;
         }
         const text = dt ? dt.getData('text/plain') : '';
@@ -756,8 +763,54 @@
     }
   }
 
+  /* 動画・音声のプレーヤーを使ったら、その段落を選ぶ（削除指定・コメントの
+     対象にする）。再生・シーク・音量の操作はそのまま効かせる。キャレットを
+     隣の段落へ移すと、続けて押した Space（一時停止）が本文への入力になって
+     しまうので、フォーカスはプレーヤーに置いたままにする。直前の文字列選択は
+     コメント対象を曖昧にするので外す */
+  function selectPlayerPara(p) {
+    selectImage(p);
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount && editor.contains(sel.anchorNode)) {
+      sel.removeAllRanges();
+    }
+  }
+
+  function playerParaOf(node) {
+    const player = node && node.closest ? node.closest('video, audio') : null;
+    const p = player ? player.closest('.img-para') : null;
+    return p && editor.contains(p) ? { p: p, player: player } : null;
+  }
+
+  /* Chrome の標準プレーヤーは操作部（再生ボタン・シークバー）の上の
+     pointerdown / click を本文側へ一切流さない。操作するとプレーヤーに
+     フォーカスが移るので、focusin で選ぶ（Tab で移った場合も同じ）。
+     フォーカスが操作部の内側にあるとキー入力も本文側へ届かず、Backspace の
+     削除指定が効かない。要素そのものにフォーカスを移し直すと、キーは本文へ
+     届き、Space（再生・一時停止）や矢印（シーク）もプレーヤーに効く */
+  let refocusing = false;
+  function onEditorFocusIn(e) {
+    if (refocusing) return;
+    const hit = playerParaOf(e.target);
+    if (!hit) return;
+    selectPlayerPara(hit.p);
+    refocusing = true;
+    try {
+      hit.player.focus({ preventScroll: true });
+    } finally {
+      refocusing = false;
+    }
+  }
+
   function onEditorClick(e) {
     const p = e.target.closest && e.target.closest('.img-para');
+    const hit = playerParaOf(e.target);
+    if (hit) {
+      // 動画の絵の上のクリック（操作部の外）は click まで届く
+      selectPlayerPara(hit.p);
+      hit.player.focus({ preventScroll: true });
+      return;
+    }
     if (p && editor.contains(p)) {
       selectImage(p);
       // 画像は contenteditable=false なのでクリックしてもキャレットは動かない。
@@ -778,23 +831,47 @@
     }
   }
 
-  // ---------- 画像段落 ----------
+  // ---------- メディア段落（画像・動画・音声） ----------
+  function kindOf(name) { return mediaKindFn(name) || 'image'; }
+
+  function isMediaFile(f) {
+    return !!f && (!!mediaKindFn(f.name || '') ||
+      /^(image|video|audio)\//.test(f.type || ''));
+  }
+
+  /* ![説明](名前) の行を、拡張子に応じて画像・動画・音声の段落にする。
+     どれも data-img / data-md を持つ同じ段落なので、削除指定・コメント・
+     逆変換（feedback.py）は種類を問わずに同じ経路を通る */
   function makeImageParagraph(name, md, flags) {
     const p = document.createElement('p');
+    const kind = kindOf(name);
     p.className = 'img-para';
     p.contentEditable = 'false';
     p.dataset.img = name;
     p.dataset.md = md;
+    p.dataset.kind = kind;
     if (flags && flags.ins) p.dataset.ins = '1';
     if (flags && flags.del) p.dataset.del = '1';
-    const img = document.createElement('img');
-    img.src = '/api/sessions/' + encodeURIComponent(sessionId) +
+    const src = '/api/sessions/' + encodeURIComponent(sessionId) +
       '/files/' + encodeURIComponent(name);
-    img.alt = name;
+    let el;
+    if (kind === 'video' || kind === 'audio') {
+      el = document.createElement(kind);
+      el.controls = true;
+      // 開いた時点では長さと最初の絵だけを取る（全体は再生時に Range で取る）
+      el.preload = 'metadata';
+      if (kind === 'video') el.playsInline = true;
+      el.src = src;
+      el.setAttribute('aria-label', name);
+    } else {
+      el = document.createElement('img');
+      el.src = src;
+      el.alt = name;
+    }
     const caption = document.createElement('span');
     caption.className = 'img-caption';
     caption.textContent = name;
-    p.appendChild(img);
+    p.appendChild(el);
     p.appendChild(caption);
     return p;
   }
@@ -809,7 +886,7 @@
     return String((p && p.dataset.cids) || '').split(/\s+/).filter(Boolean);
   }
 
-  /* 選択中の画像段落の情報を返す（コメント対象の指定に使う） */
+  /* 選択中のメディア段落の情報を返す（コメント対象の指定に使う） */
   function getSelectedImage() {
     if (!selectedImg || !selectedImg.isConnected) return null;
     const name = selectedImg.dataset.img || '';
@@ -817,6 +894,7 @@
       name: name,
       md: selectedImg.dataset.md || ('![](' + name + ')'),
       cids: imageCids(selectedImg),
+      kind: selectedImg.dataset.kind || kindOf(name),
     };
   }
 
@@ -839,15 +917,46 @@
     changed();
   }
 
-  function insertImageParagraph(name) {
+  /* 人間が追加したメディアの段落を入れる。after を渡せばその段落の後ろ
+     （ドロップした位置や、続けて追加するときの直前の段落）、渡さなければ
+     キャレットのある段落の後ろ、どちらも無ければ末尾に入れる */
+  function insertImageParagraph(name, after) {
     snapshot();
     const p = makeImageParagraph(name, '![](' + name + ')', { ins: true });
     const r = getRange();
-    const cur = r ? paraOf(r.startContainer) : null;
-    if (cur) cur.after(p);
+    let cur = after && after.isConnected && after.parentNode === editor
+      ? after : null;
+    if (!cur && r && editor.contains(r.startContainer)) {
+      cur = paraOf(r.startContainer);
+    }
+    if (cur && cur.parentNode === editor) cur.after(p);
     else editor.appendChild(p);
     changed();
     return p;
+  }
+
+  // ---------- ファイルのドロップ ----------
+  function hasFiles(e) {
+    const types = e.dataTransfer ? e.dataTransfer.types : null;
+    return !!types && Array.prototype.indexOf.call(types, 'Files') >= 0;
+  }
+
+  function onDragOver(e) {
+    if (!hasFiles(e)) return; // 文字のドラッグは beforeinput 側で止める
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  }
+
+  /* ファイルをドロップした段落の後ろに添付する。ブラウザの既定（ファイルを
+     開いてページを離れる）は止める */
+  function onDrop(e) {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    const files = Array.from(e.dataTransfer.files || []);
+    if (!files.length || !onImageFileCb) return;
+    let p = document.elementFromPoint(e.clientX, e.clientY);
+    while (p && p.parentNode !== editor) p = p.parentNode;
+    onImageFileCb(files, p && p.tagName === 'P' ? p : null);
   }
 
   // ---------- マークダウンの組み立て ----------
@@ -1445,6 +1554,7 @@
     sessionId = (opts && opts.sessionId) || '';
     onImageFileCb = (opts && opts.onImageFile) || null;
     onImageCommentsDroppedCb = (opts && opts.onImageCommentsDropped) || null;
+    if (opts && typeof opts.mediaKind === 'function') mediaKindFn = opts.mediaKind;
     if (savedHtml) {
       editor.innerHTML = savedHtml;
     } else {
@@ -1455,6 +1565,9 @@
     editor.addEventListener('compositionend', onCompositionEnd);
     editor.addEventListener('keydown', onKeyDown);
     editor.addEventListener('click', onEditorClick);
+    editor.addEventListener('focusin', onEditorFocusIn);
+    editor.addEventListener('dragover', onDragOver);
+    editor.addEventListener('drop', onDrop);
   }
 
   window.Tracker = {
