@@ -14,6 +14,12 @@
       <div id="doc-meta">全セッションの校正結果を確認できます</div>
     </div>
     <div id="actions">
+      <label class="theme-toggle"
+             title="校正エディタ・一覧・HTMLレビューも同じ配色になります。設定はこのツールに保存され、次に開いたときも同じ配色で表示されます">
+        <input type="checkbox" id="dark-toggle" role="switch">
+        <span class="switch" aria-hidden="true"></span>
+        <span>ダークモード</span>
+      </label>
       <input id="search-query" placeholder="ID・タイトルで検索">
       <input id="search-workspace" placeholder="ワークスペースで検索">
       <a class="nav-link" href="/">一覧へ</a>
@@ -21,6 +27,7 @@
   </header>
   <main><div id="admin-list"></div></main>
 </div>
+<script src="/static/theme.js"></script>
 <script src="/static/admin.js"></script>
 </body>
 </html>

@@ -856,3 +856,56 @@ def update_base_text(session_id: str, text: str) -> dict[str, Any]:
         rev["base_text"] = text
         save_session(s)
         return s
+
+
+# ---------- 画面の設定（配色など） ----------
+# 全画面に共通の設定。data/settings.json に保存し、ブラウザではなくサーバーが
+# 持つ（ポートが変わるとブラウザの localStorage は別のオリジンになって消える。
+# サーバーが <html data-theme> に書いて返せば、読み込み時にちらつかない）
+THEMES = ("light", "dark")
+DEFAULT_SETTINGS: dict[str, Any] = {"theme": "light"}
+
+
+def settings_path() -> Path:
+    d = data_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "settings.json"
+
+
+def load_settings() -> dict[str, Any]:
+    """保存済みの設定を返す。無い・壊れている・知らない値の項目は既定値にする。
+
+    画面を配信するたびに読むので、ファイルが壊れていても例外にしない。
+    """
+    settings = dict(DEFAULT_SETTINGS)
+    try:
+        raw = json.loads(settings_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return settings
+    if isinstance(raw, dict) and raw.get("theme") in THEMES:
+        settings["theme"] = raw["theme"]
+    return settings
+
+
+def save_settings(changes: dict[str, Any]) -> dict[str, Any]:
+    """設定の一部を書き換えて保存し、書き換え後の設定全体を返す。"""
+    if not isinstance(changes, dict) or not changes:
+        raise ValueError("変更する設定を指定してください（例: {\"theme\": \"dark\"}）")
+    unknown = sorted(set(changes) - set(DEFAULT_SETTINGS))
+    if unknown:
+        raise ValueError(f"不明な設定です: {', '.join(unknown)}")
+    if "theme" in changes and changes["theme"] not in THEMES:
+        raise ValueError(
+            f"配色は {' / '.join(THEMES)} のどれかを指定してください: "
+            f"{changes['theme']!r}"
+        )
+    with _LOCK:
+        settings = load_settings()
+        settings.update(changes)
+        path = settings_path()
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(
+            json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        tmp.replace(path)
+        return settings

@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -93,6 +94,24 @@ def build_version() -> str:
     知らせる（静的ファイルだけの変更でもページ側のJSは古いままなので）。
     """
     return f"{LOADED_VERSION}-{versioning.static_version()}"
+
+
+_HTML_TAG = re.compile(rb"<html\b")
+
+
+def with_theme(page: bytes, theme: str) -> bytes:
+    """画面の <html> に配色（data-theme）を書き込む。
+
+    配色を返すのはサーバーなので、読み込み直後から正しい配色で描かれる
+    （JS で後から切り替えると、一瞬だけ明るい画面が出る）。CSP がインラインの
+    スクリプトを禁じているので、HTML に直接書くのがいちばん早い。値は
+    storage.THEMES の中からしか来ない。
+    """
+    if theme not in storage.THEMES:
+        theme = storage.DEFAULT_SETTINGS["theme"]
+    return _HTML_TAG.sub(
+        b'<html data-theme="' + theme.encode("ascii") + b'"', page, count=1
+    )
 
 
 def _shutdown(conn: socket.socket) -> None:
@@ -362,8 +381,11 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if csp is None:
             csp = _CSP_HTML if path.suffix == ".html" else _CSP_STRICT
+        body = path.read_bytes()
+        if path.suffix == ".html":
+            body = with_theme(body, storage.load_settings()["theme"])
         self._emit(
-            path.read_bytes(),
+            body,
             _CONTENT_TYPES.get(path.suffix, "application/octet-stream"),
             200,
             csp,
@@ -490,6 +512,8 @@ class _Handler(BaseHTTPRequestHandler):
             # 添付できる形式と上限。エディタがファイル選択の絞り込みと、
             # 送る前の確認（大きすぎるファイルを送り始めない）に使う
             self._send_json(storage.media_config())
+        elif parsed.path == "/api/settings":
+            self._send_json(storage.load_settings())
         elif len(parts) == 4 and parts[:2] == ["api", "sessions"] \
                 and parts[3] == "source":
             # HTMLレビューの対象ドキュメント。iframeから読み込まれる。
@@ -553,6 +577,11 @@ class _Handler(BaseHTTPRequestHandler):
     def _route_post(self) -> None:
         parsed = urlparse(self.path)
         parts = [p for p in parsed.path.split("/") if p]
+        if parts == ["api", "settings"]:
+            # 画面の設定（配色）。管理画面から変える。書き込みなので
+            # Origin と Content-Type のガードは他の POST と同じに効く
+            self._send_json(storage.save_settings(self._read_body_json()))
+            return
         if len(parts) < 4 or parts[:2] != ["api", "sessions"]:
             self._send_error_json(404, "不明なパスです")
             return
@@ -954,7 +983,8 @@ def self_test() -> None:
     thread.start()
     try:
         base = f"http://127.0.0.1:{srv.server_address[1]}"
-        paths = ["/api/health", "/api/media", "/", "/admin", "/static/app.js",
+        paths = ["/api/health", "/api/media", "/api/settings", "/", "/admin",
+                 "/static/theme.js", "/static/app.js",
                  "/static/tracker.js", "/api/sessions?limit=1"]
         with _LOCAL.open(base + paths[-1], timeout=10) as res:
             sessions = json.loads(res.read().decode("utf-8"))["sessions"]

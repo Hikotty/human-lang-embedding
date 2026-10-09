@@ -210,6 +210,26 @@
     });
   }
 
+  /* ---------- ダークモードのトグル ----------
+     既定はライト。オンにした時点で保存し、全画面に反映する（theme.js）。
+     保存できなかったらトグルを元に戻し、理由を出す */
+  function initThemeToggle() {
+    const toggle = $('#dark-toggle');
+    const sync = (theme) => { toggle.checked = theme === 'dark'; };
+    sync(window.HleTheme.current());
+    // 他の画面（別のタブの管理画面）で変えられたらトグルも合わせる
+    document.addEventListener('hle-theme', (e) => sync(e.detail));
+    toggle.addEventListener('change', async () => {
+      const before = window.HleTheme.current();
+      try {
+        await window.HleTheme.save(toggle.checked ? 'dark' : 'light');
+      } catch (e) {
+        sync(before);
+        alert('配色を保存できませんでした: ' + e.message);
+      }
+    });
+  }
+
   let timer = null;
   ['#search-query', '#search-workspace'].forEach((sel) => {
     $(sel).addEventListener('input', () => {
@@ -217,5 +237,6 @@
       timer = setTimeout(renderList, 300);
     });
   });
+  initThemeToggle();
   renderList();
 })();
