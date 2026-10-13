@@ -32,6 +32,11 @@
     </div>
     <aside id="sidebar">
       <h2>コメント</h2>
+      <div class="comment-filter" role="radiogroup" aria-label="コメントの絞り込み（著者別）">
+        <label><input type="radio" name="comment-filter" value="all" checked>すべて</label>
+        <label><input type="radio" name="comment-filter" value="human">人間</label>
+        <label><input type="radio" name="comment-filter" value="ai">AI</label>
+      </div>
       <div id="comment-draft" hidden>
         <div class="quote" id="draft-quote"></div>
         <div id="draft-tag"></div>

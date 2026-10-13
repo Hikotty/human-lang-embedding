@@ -71,6 +71,7 @@
   let draftTarget = null; // 下書き中のコメント対象 { target, quote, image }
   let activeCid = null;
   let editing = null; // 編集中の対象 { cid, rid|null }
+  let commentFilter = 'all'; // コメントの絞り込み（'all' | 'human' | 'ai'）
 
   async function initEditorView(id) {
     sid = id;
@@ -91,6 +92,7 @@
       { sessionId: sid, onImageFile: handleMediaFiles,
         onImageCommentsDropped: dropImageComments, mediaKind: mediaKind });
     renderMeta();
+    initCommentFilter();
     renderComments();
     anchorAiComments();
     $('#btn-update-reload').addEventListener('click', reloadForUpdate);
@@ -540,6 +542,47 @@
       : '<span class="who human">あなた</span>';
   }
 
+  /* ---------- コメントの絞り込み（著者別） ----------
+     「すべて / 人間 / AI」でコメントを絞る。判定はトップレベルコメントの
+     著者（未指定=human）で、スレッド丸ごと（返信を含む）出し入れする。
+     隠れたコメントは本文のハイライトも消す。ロードのたびに「すべて」に戻る
+     （UIの checked 初期状態と一致）ので、ここでは状態を記憶しない */
+  function initCommentFilter() {
+    commentFilter = 'all';
+    document.querySelectorAll('input[name="comment-filter"]').forEach((r) => {
+      r.checked = r.value === 'all';
+      r.addEventListener('change', () => {
+        if (!r.checked) return;
+        commentFilter = r.value;
+        renderComments();
+      });
+    });
+  }
+
+  /* トップレベルの著者（未指定=human）がフィルタに合うか */
+  function commentVisible(c) {
+    if (commentFilter === 'all') return true;
+    const author = c && c.author === 'ai' ? 'ai' : 'human';
+    return author === commentFilter;
+  }
+
+  /* 隠れているコメントは本文のハイライト（span.cmt・画像段落）も消す。
+     DOMのcmt構造は壊さず、class の付け外しだけで見た目を戻す */
+  function applyCommentFilterToBody() {
+    const hidden = new Set();
+    (session && session.comments ? session.comments : []).forEach((c) => {
+      if (!commentVisible(c)) hidden.add(c.id);
+    });
+    document.querySelectorAll('#editor .cmt[data-cid]').forEach((span) => {
+      span.classList.toggle('cmt-filtered', hidden.has(span.dataset.cid));
+    });
+    document.querySelectorAll('#editor .img-para[data-cids]').forEach((p) => {
+      const cids = (p.dataset.cids || '').split(/\s+/).filter(Boolean);
+      const anyVisible = cids.some((cid) => !hidden.has(cid));
+      p.classList.toggle('cmt-filtered', cids.length > 0 && !anyVisible);
+    });
+  }
+
   /* ---------- AIコメントの本文への結び付け ----------
      AIが add_comment で付けたコメント（author==='ai'・text）は、保存された
      本文にはまだ span.cmt が無い。ロード時とポーリングのたびに、本文に
@@ -720,9 +763,21 @@
     if (!session.comments.length) {
       list.innerHTML = '<div class="empty-note">コメントはまだありません。<br>' +
         '本文を選択して「💬 コメント」を押すと追加できます。</div>';
+      applyCommentFilterToBody();
       return;
     }
-    list.innerHTML = session.comments.map((c, i) => {
+    // 番号は全コメントの通し番号を保ち、絞り込みで隠すものだけ描かない
+    const visible = session.comments
+      .map((c, i) => ({ c: c, n: i + 1 }))
+      .filter((x) => commentVisible(x.c));
+    if (!visible.length) {
+      list.innerHTML = '<div class="empty-note">この絞り込みに合う' +
+        'コメントはありません。</div>';
+      applyCommentFilterToBody();
+      return;
+    }
+    list.innerHTML = visible.map(({ c, n: cardNo }) => {
+      const i = cardNo - 1;
       const replies = (c.replies || []).map((r) =>
         '<div class="reply">' + authorLabel(r.author) +
         '<span class="when">' + esc(fmtDate(r.created_at)) + '</span>' +
@@ -770,6 +825,7 @@
     list.querySelectorAll('button[data-edit-cancel]').forEach((btn) => {
       btn.addEventListener('click', () => { editing = null; renderComments(); });
     });
+    applyCommentFilterToBody();
   }
 
   function startEdit(key) {

@@ -73,6 +73,7 @@
   let lastSel = null;  // 直近の非collapsed選択 { quote, prefix, suffix, range }
   let activeCid = null;
   let editing = null;  // 編集中の対象 { cid, rid|null }
+  let commentFilter = 'all'; // コメントの絞り込み（'all' | 'human' | 'ai'）
   let anchors = new Map();    // cid -> Range（現在のiframe DOM上の位置）
   let objAnchors = new Map(); // cid -> 画像・図の要素（画像コメント）
   let selectedObj = null;     // クリックで選んだ画像・図
@@ -94,6 +95,7 @@
     }
     document.title = session.title + ' - HTMLレビュー';
     renderMeta();
+    initCommentFilter();
     renderComments();
     frame().addEventListener('load', onFrameLoad);
     frame().src = '/api/sessions/' + sid + '/source';
@@ -293,6 +295,8 @@
     if (!doc || !doc.body) return;
     const idx = textIndex();
     session.comments.forEach((c) => {
+      // 絞り込みで隠れているコメントはハイライトも描かない
+      if (!commentVisible(c)) return;
       // 範囲コメントの quote は範囲内の文字列をつないだ見出しなので、
       // 本文から探さない（位置は region で持つ）
       if (c.target === 'region') return;
@@ -585,6 +589,31 @@
       : '<span class="who human">あなた</span>';
   }
 
+  /* ---------- コメントの絞り込み（著者別。app.jsと同じ考え方） ----------
+     「すべて / 人間 / AI」で絞る。判定はトップレベルコメントの著者
+     （未指定=human）で、スレッド丸ごと（返信を含む）出し入れする。
+     隠れたコメントは本文のハイライト（text の Highlight、画像・図の枠、
+     範囲の枠）も描かない。ロードのたびに「すべて」に戻る */
+  function initCommentFilter() {
+    commentFilter = 'all';
+    document.querySelectorAll('input[name="comment-filter"]').forEach((r) => {
+      r.checked = r.value === 'all';
+      r.addEventListener('change', () => {
+        if (!r.checked) return;
+        commentFilter = r.value;
+        renderComments();
+        applyHighlights();
+      });
+    });
+  }
+
+  /* トップレベルの著者（未指定=human）がフィルタに合うか */
+  function commentVisible(c) {
+    if (commentFilter === 'all') return true;
+    const author = c && c.author === 'ai' ? 'ai' : 'human';
+    return author === commentFilter;
+  }
+
   /* ---------- コメントの種類（指摘・質問。app.jsと同じ） ----------
      指摘は本文を直してほしいもの、質問は答えてほしいだけのもの */
   const TAG_LABELS = { issue: '指摘', question: '質問' };
@@ -713,7 +742,17 @@
         '「💬 コメント」を押すと追加できます。</div>';
       return;
     }
-    list.innerHTML = session.comments.map((c, i) => {
+    // 番号は全コメントの通し番号を保ち、絞り込みで隠すものだけ描かない
+    const visible = session.comments
+      .map((c, i) => ({ c: c, n: i + 1 }))
+      .filter((x) => commentVisible(x.c));
+    if (!visible.length) {
+      list.innerHTML = '<div class="empty-note">この絞り込みに合う' +
+        'コメントはありません。</div>';
+      return;
+    }
+    list.innerHTML = visible.map(({ c, n: cardNo }) => {
+      const i = cardNo - 1;
       const replies = (c.replies || []).map((r) =>
         '<div class="reply">' + authorLabel(r.author) +
         '<span class="when">' + esc(fmtDate(r.created_at)) + '</span>' +
@@ -1407,6 +1446,8 @@
     const cur = session.revisions.length - 1;
     session.comments.forEach((c, i) => {
       if (c.target !== 'region') return;
+      // 絞り込みで隠れている範囲コメントは枠も描かない
+      if (!commentVisible(c)) return;
       const r = regionClientRect(c.region);
       if (!r) return;
       // 前の稿で囲んだ範囲は、今の稿では図が書き換わっていることがある。

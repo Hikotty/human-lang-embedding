@@ -30,6 +30,11 @@
     </div>
     <aside id="sidebar">
       <h2>コメント</h2>
+      <div class="comment-filter" role="radiogroup" aria-label="コメントの絞り込み（著者別）">
+        <label><input type="radio" name="comment-filter" value="all" checked>すべて</label>
+        <label><input type="radio" name="comment-filter" value="human">人間</label>
+        <label><input type="radio" name="comment-filter" value="ai">AI</label>
+      </div>
       <div class="hint">表示されたページの文字列（図の中の文字も）を
         ドラッグで選択するか、画像・図をクリックして「💬 コメント」を
         押すと、その箇所にコメントを付けられます。「▭ 範囲指定」を押して
