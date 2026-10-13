@@ -92,6 +92,7 @@
         onImageCommentsDropped: dropImageComments, mediaKind: mediaKind });
     renderMeta();
     renderComments();
+    anchorAiComments();
     $('#btn-update-reload').addEventListener('click', reloadForUpdate);
     $('#btn-image').addEventListener('click', () => $('#image-input').click());
     $('#image-input').addEventListener('change', (e) => {
@@ -539,6 +540,48 @@
       : '<span class="who human">あなた</span>';
   }
 
+  /* ---------- AIコメントの本文への結び付け ----------
+     AIが add_comment で付けたコメント（author==='ai'・text）は、保存された
+     本文にはまだ span.cmt が無い。ロード時とポーリングのたびに、本文に
+     ラッパーが無いものを quote で探して人間と同じ wrapRangeComment で包み、
+     通常の保存フロー（edited_html）に乗せる。以降は人間コメントと同じく
+     番号・ハイライト・カード↔本文リンクが付く。見つからないものは
+     カードに未アンカー注記を出し、毎回探し直す。 */
+  function isAiTextComment(c) {
+    return c && c.author === 'ai' &&
+      c.target !== 'image' && c.target !== 'region';
+  }
+
+  /* 未アンカーのAIコメント（quote が本文に見つからず結び付かないもの）の
+     注記。返信・削除は従来どおりできる */
+  function unanchoredNote(c) {
+    if (isAiTextComment(c) && c.anchored === false && !hasBodyAnchor(c.id)) {
+      return '<div class="unanchored-note">本文に該当箇所が見つかりません</div>';
+    }
+    return '';
+  }
+
+  function hasBodyAnchor(cid) {
+    return !!document.querySelector('#editor .cmt[data-cid="' + cid + '"]');
+  }
+
+  function anchorAiComments() {
+    if (!session || !session.comments) return;
+    // 下書き・編集・コメント入力中は本文を触らない（保存の取り違えを防ぐ）
+    if (draftCid || editing) return;
+    let anchored = false;
+    session.comments.forEach((c) => {
+      if (!isAiTextComment(c) || hasBodyAnchor(c.id)) return;
+      if (Tracker.anchorAiComment(c.id, c.quote, c.prefix, c.suffix)) {
+        anchored = true;
+      }
+    });
+    if (anchored) {
+      onEdited();     // 通常の保存フローで edited_html に残す
+      renderComments();
+    }
+  }
+
   /* ---------- コメントの種類（指摘・質問） ----------
      指摘（issue）は本文を直してほしいもの、質問（question）は答えてほしい
      だけのもの。AIは get_feedback の tag を見て、修正稿に反映するか、返信で
@@ -688,7 +731,7 @@
       return '<div class="comment-card' +
         (c.id === activeCid ? ' active' : '') +
         '" data-cid="' + esc(c.id) + '">' +
-        quoteHtml(c, i + 1) +
+        quoteHtml(c, i + 1) + unanchoredNote(c) +
         // 編集中は選択欄が種類を示すので、保存済みの種類のバッジは出さない
         (isEditing(c.id, null) ? '' : tagBadge(c)) + authorLabel(c.author) +
         '<span class="when">' + esc(fmtDate(c.created_at)) + '</span>' +
@@ -921,6 +964,8 @@
       session.comments = remote.comments;
       renderComments();
     }
+    // AIコメントを本文に結び付ける。undo で span が落ちても毎回やり直す
+    anchorAiComments();
   }
 
   async function completeReview() {

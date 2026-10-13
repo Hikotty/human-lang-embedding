@@ -40,6 +40,15 @@ server = MCPServer(
         "reply_commentで回答するだけで本文は変えない。HTMLレビューでは人間が"
         "ページ上を囲んだ範囲へのコメント（target=\"region\"）があり、"
         "get_feedbackがその範囲のスクリーンショットを画像で添付する。"
+        "AI自身も、人間が書き足した部分の意図が読み取れない・誤りに見えるが"
+        "黙って直すべきでないとき、チャットではなくその箇所に add_comment で"
+        "コメント（tag=\"question\"=質問 / tag=\"issue\"=指摘）を残せる。"
+        "指示をどう適用した／しなかったかをその箇所で説明するのにも使う。"
+        "全ての変更に注釈は付けず、人間が判断・確認すべき点だけに絞る。"
+        "人間はカード返信で答え、AIは get_feedback の comments[].replies"
+        "（author=\"human\"）で受け取る。comments[] の author が \"ai\" の"
+        "ものはAI自身が付けたコメントで、人間からの修正指示ではない。"
+        "人間への質問は reply_comment で答える（質問を理由に本文は変えない）。"
         "一連の添削が終わったら、受けた指摘の傾向を整理してskills"
         "（エージェントのスキル定義）へ反映することを人間に提案する。"
     ),
@@ -49,6 +58,13 @@ server = MCPServer(
 # 容量）。これを超えた分と前の稿への範囲コメントは、screenshot のパスだけを渡す
 MAX_ATTACHED_SCREENSHOTS = 10
 MAX_ATTACHED_BYTES = 8 * 1024 * 1024
+
+# add_comment の prefix/suffix に残す文脈の長さ。HTMLレビューの
+# html-review.js（CONTEXT_LEN=50）と合わせ、mdエディタ側の再アンカリングが
+# html モードと同じ文脈幅で絞り込めるようにする
+COMMENT_CONTEXT_LEN = 50
+# add_comment の quote の最大長（UIの下書きと同じ）
+COMMENT_QUOTE_LIMIT = 300
 
 
 def _dumps(obj) -> str:
@@ -308,6 +324,21 @@ def get_feedback(
     人間の削除・追加と指摘を踏まえて文章を修正し、質問には reply_comment で
     答えたうえで、submit_revision で再提示すること。
 
+    各 comments[] には author（"ai" / "human"。author を持たない旧データは
+    "human"）がある。author=="ai" のコメントはAI自身が add_comment で付けた
+    もので、人間からの修正指示ではない（自分の覚え書き・人間への問いかけ）。
+    AI自身のコメントに人間が返信すると、その author=="human" の返信が
+    comments[].replies に入るので、それを読む。add_comment で付けた直後の
+    コメントはまだ本文に結び付いておらず anchored=false・番号なしで quote
+    だけを持つ。人間が画面を開くと本文の該当箇所に結び付き、以降は番号と
+    〖Cn〗が付く。
+
+    人間が書き足した部分の意図が読み取れない・誤りに見えるが黙って直すべき
+    でないときは、チャットに書くのではなく add_comment でその箇所に質問
+    （tag="question"）か指摘（tag="issue"）を残すこと。指示をどう適用した／
+    しなかったかをその箇所で説明するのにも使える。ただし全ての変更に注釈は
+    付けず、人間が判断・確認すべき点だけに絞ること。
+
     一連の添削が終わったら（人間から完了・OKの連絡を受けたら）、受けた指摘を
     その場の修正だけで終わらせず、傾向を整理して skills（エージェントのスキル
     定義。Kiroなら .kiro/skills や .kiro/steering）へ反映することを人間に
@@ -420,6 +451,212 @@ def submit_revision(
             "missing_images": missing,
             "browser_opened": opened,
             "message": "修正稿を登録しました。人間の再校正を待ってください。",
+        })
+    )
+
+
+def _ws_collapsed(text: str) -> str:
+    """連続する空白を1つに畳む（html モードの空白寛容な照合用）。"""
+    return re.sub(r"\s+", " ", text)
+
+
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _strip_tags(html: str) -> str:
+    """HTMLのタグを除いた、見た目のテキストに近い文字列を返す（軽量）。"""
+    return _TAG_RE.sub("", html)
+
+
+def _resolve_md_quote(
+    result_text: str, quote: str, prefix: str, suffix: str
+) -> tuple[str, str]:
+    """md本文（result_text 相当）に対して quote の位置を確定し、
+    保存する prefix / suffix を返す。確定できなければ ToolError を raise する。
+
+    - どの段落（\\n 区切りの行）にも丸ごと収まらないが連結全体には出る
+      → 段落をまたぐ引用として失敗
+    - 全く見つからない → not-found として失敗（result_text から引用せよ）
+    - 複数一致で prefix/suffix 未指定 → 件数入りで失敗
+    - prefix/suffix で一意化できたら、確定位置の前後最大 COMMENT_CONTEXT_LEN
+      文字を prefix / suffix として計算して返す
+    """
+    paragraphs = result_text.split("\n")
+    in_paragraph = any(quote in para for para in paragraphs)
+    if not in_paragraph:
+        if quote in result_text:
+            raise ValueError(
+                "引用（quote）が段落（改行）をまたいでいます。"
+                "add_comment は1つの段落に収まる範囲だけを指せます。"
+                "1段落に収まるように quote を短くしてください。"
+            )
+        raise ValueError(
+            "引用（quote）が本文に見つかりません。get_feedback の "
+            "result_text（校正反映後の本文。削除は除かれ人間の挿入は含む）"
+            "からそのまま引用してください。"
+        )
+    # 出現位置を数える（段落をまたがない前提の全文走査でよい）
+    positions: list[int] = []
+    start = 0
+    while True:
+        i = result_text.find(quote, start)
+        if i < 0:
+            break
+        positions.append(i)
+        start = i + 1
+    if prefix or suffix:
+        # prefix + quote + suffix が一致する位置を優先する
+        combo = prefix + quote + suffix
+        j = result_text.find(combo)
+        if j >= 0:
+            pos = j + len(prefix)
+        else:
+            # prefix/suffix 付きでも一意に絞れないなら、文脈の一致長で選ぶ
+            pos = _best_context_match(result_text, quote, positions, prefix, suffix)
+            if pos is None:
+                raise ValueError(
+                    "指定された prefix / suffix では引用の位置を一つに"
+                    "特定できませんでした。前後の文脈を正確に写してください。"
+                )
+    elif len(positions) > 1:
+        raise ValueError(
+            f"引用（quote）が本文に {len(positions)} 箇所あります。"
+            "prefix / suffix に前後の文脈を添えて、どの箇所かを指定して"
+            "ください。"
+        )
+    else:
+        pos = positions[0]
+    end = pos + len(quote)
+    computed_prefix = result_text[max(0, pos - COMMENT_CONTEXT_LEN):pos]
+    computed_suffix = result_text[end:end + COMMENT_CONTEXT_LEN]
+    return computed_prefix, computed_suffix
+
+
+def _best_context_match(
+    text: str, quote: str, positions: list[int], prefix: str, suffix: str
+) -> int | None:
+    """各出現位置の前後文脈が最もよく一致する位置を返す（html-review.js の
+    locate と同じ考え方）。候補が無ければ None。"""
+    best = None
+    best_score = -1
+    for pos in positions:
+        before = text[max(0, pos - len(prefix)):pos]
+        after = text[pos + len(quote):pos + len(quote) + len(suffix)]
+        score = _suffix_match_len(before, prefix) + _prefix_match_len(after, suffix)
+        if score > best_score:
+            best_score = score
+            best = pos
+    return best
+
+
+def _prefix_match_len(actual: str, expected: str) -> int:
+    n = 0
+    while n < len(actual) and n < len(expected) and actual[n] == expected[n]:
+        n += 1
+    return n
+
+
+def _suffix_match_len(actual: str, expected: str) -> int:
+    n = 0
+    while (n < len(actual) and n < len(expected)
+           and actual[-1 - n] == expected[-1 - n]):
+        n += 1
+    return n
+
+
+def _resolve_html_quote(base_text: str, quote: str) -> None:
+    """HTML本文に quote が（空白寛容で）存在するか確認する。
+
+    「正当な quote を拒否するより、クライアントに『該当箇所が見つからない』
+    と言わせる」方針に従い、存在が全く確認できないときだけ ToolError にする。
+    厳密な位置は人間同様 prefix/suffix で持ち、クライアントの locate() が
+    復元する。
+    """
+    stripped = _ws_collapsed(_strip_tags(base_text))
+    needle = _ws_collapsed(quote)
+    if needle.strip() and needle not in stripped:
+        raise ValueError(
+            "引用（quote）が本文に見つかりません。HTMLレビュー対象の"
+            "レンダリング後テキストから引用してください（タグは含めない）。"
+        )
+
+
+@server.tool()
+def add_comment(
+    session_id: str,
+    quote: str,
+    text: str,
+    tag: str = "issue",
+    prefix: str = "",
+    suffix: str = "",
+) -> str:
+    """AIが現行リビジョンの本文の一箇所を指してコメントを付ける。
+
+    人間が書き足した部分の意図が読み取れない・誤りに見えるが黙って直すべき
+    でないとき、チャットではなくその箇所にコメントを残すのに使う。付けた
+    コメントは author="ai" で保存され、画面には文字の「AI」バッジが付く。
+    人間はカードで返信でき、AIは get_feedback の comments[].replies
+    （author="human"）でその返信を受け取る。指示をどう適用した／しなかったかを
+    その箇所で説明するのにも使える。全ての変更に注釈を付けず、人間が判断・
+    確認すべき点だけに絞ること。
+
+    位置は quote（本文の部分文字列）で指す。mdモードでは quote は get_feedback
+    の result_text（校正反映後の本文。削除は除かれ、人間の挿入は含む）に
+    そのまま現れる文字列で、1つの段落（改行で区切られた1行）に収まる必要が
+    ある。段落をまたぐと失敗する。本文に quote が複数ある場合は prefix / suffix
+    に前後の文脈を添えて位置を特定する。htmlモードでは、レンダリング後の
+    テキスト（タグを含めない）から引用する。
+
+    付けた直後はまだ本文の該当箇所に結び付いていない（anchored=false）。人間が
+    レビュー画面を開くと、エディタがその quote を本文から探して結び付け、
+    以降は人間コメントと同じく番号・ハイライト・カードが付く。見つからない
+    場合はカードに「本文に該当箇所が見つかりません」と出て、返信・削除は
+    できる（画面を開くたびに探し直す）。
+
+    Args:
+        session_id: open_review が返したセッションID
+        quote: コメントを付ける本文の部分文字列（必須）
+        text: コメント本文（必須）
+        tag: コメントの種類。"issue"（指摘。既定）/ "question"（質問）
+        prefix: quote の直前の文脈（同じ quote が複数ある場合の位置特定に使う）
+        suffix: quote の直後の文脈（同上）
+    """
+    quote = str(quote)[:COMMENT_QUOTE_LIMIT]
+    if not quote.strip():
+        raise ValueError("quote（コメントを付ける本文の引用）が空です。")
+    if not str(text).strip():
+        raise ValueError("text（コメント本文）が空です。")
+    session = storage.load_session(session_id)  # 不在は KeyError
+    mode = storage.session_mode(session)
+    if mode == "html":
+        _resolve_html_quote(session["revisions"][-1]["base_text"], quote)
+        store_prefix, store_suffix = str(prefix), str(suffix)
+    else:
+        store_prefix, store_suffix = _resolve_md_quote(
+            feedback.build_feedback(session)["result_text"],
+            quote, str(prefix), str(suffix),
+        )
+    comment = storage.add_comment(
+        session_id, quote=quote, text=text, author="ai",
+        prefix=store_prefix, suffix=store_suffix, tag=tag, anchored=False,
+    )
+    port = _port()
+    return _dumps(
+        _with_server_note(port, {
+            "id": comment["id"],
+            "revision": comment["revision"],
+            "quote": comment["quote"],
+            "prefix": store_prefix,
+            "suffix": store_suffix,
+            "tag": comment.get("tag", "issue"),
+            "author": "ai",
+            "anchored": False,
+            "mode": mode,
+            "message": (
+                "AIコメントを登録しました。人間がレビュー画面を開くと本文の"
+                "該当箇所に結び付きます。人間の返信は get_feedback の "
+                "comments[].replies で受け取れます。"
+            ),
         })
     )
 

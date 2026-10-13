@@ -534,6 +534,26 @@ def test_add_question_comment_keeps_tag():
     assert storage.load_session(s["id"])["comments"][0]["tag"] == "question"
 
 
+# ---------- AI著者コメントの未アンカー状態 ----------
+def test_add_ai_text_comment_unanchored_sets_flag():
+    """author='ai'・text・anchored=False のときだけ anchored キーを書く。"""
+    s = storage.create_session("本文です。", "d", "")
+    c = storage.add_comment(s["id"], quote="本文", text="AI注記", author="ai",
+                            comment_id="a1", anchored=False)
+    assert c["anchored"] is False
+    assert storage.load_session(s["id"])["comments"][0]["anchored"] is False
+
+
+def test_human_and_anchored_comments_omit_anchored_key():
+    """人間コメント・アンカー済みは従来どおりキーを増やさない。"""
+    s = storage.create_session("本文です。", "d", "")
+    human = storage.add_comment(s["id"], quote="本文", text="人間", comment_id="h1")
+    assert "anchored" not in human
+    ai_anchored = storage.add_comment(s["id"], quote="本文", text="AI", author="ai",
+                                      comment_id="a2")  # 既定 anchored=True
+    assert "anchored" not in ai_anchored
+
+
 @pytest.mark.parametrize("bad", ["", "Question", "指摘", "fix", "issue "])
 def test_add_comment_rejects_unknown_tag(bad):
     s = storage.create_session("t", "d", "")

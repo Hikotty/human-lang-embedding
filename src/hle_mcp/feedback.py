@@ -331,7 +331,60 @@ def compose_changes(paragraphs: list[_Paragraph]) -> list[dict[str, Any]]:
     return changes
 
 
-def _comment_view(comment: dict[str, Any], number: int) -> dict[str, Any]:
+def body_cids(paragraphs: list[_Paragraph]) -> set[str]:
+    """編集済みHTMLの本文に現れるコメントID（span.cmt / 画像段落の data-cids）。
+
+    ブラウザがAIコメントを本文に結び付けると、ここに cid が現れる。feedback は
+    これを見て「本文に結び付いている（アンカー済み）」と判定する。
+    """
+    cids: set[str] = set()
+    for para in paragraphs:
+        if para.img is not None:
+            cids.update(c for c in para.img.get("cids", ()) if c)
+            continue
+        for seg in para.segments:
+            cids.update(seg.cids)
+    return cids
+
+
+def _is_anchored(comment: dict[str, Any], anchored_cids: set[str]) -> bool:
+    """コメントが本文にアンカーされているか。
+
+    AIが付けたテキストコメントは、ブラウザが本文の該当箇所を見つけて
+    span.cmt で包むまで anchored=False を持つ（未アンカー）。ただし本文の
+    HTMLにその cid の span.cmt が現れていれば、保存されたコメント側の
+    anchored キーに関わらずアンカー済みとして扱う（ブラウザが結び付けた後は
+    人間コメントと同じ）。それ以外（人間のコメント・画像/範囲コメント）は
+    anchored キーを持たず、常にアンカー済み。
+    """
+    if comment.get("anchored") is False:
+        return comment["id"] in anchored_cids
+    return True
+
+
+def _comment_numbers(
+    session: dict[str, Any], anchored_cids: set[str] | None = None
+) -> dict[str, int]:
+    """アンカー済みのコメントだけに、出現順の連番を振る。
+
+    未アンカーのAIコメントは本文に span.cmt が無く、注釈の〖Cn〗にも
+    出ないので番号を与えない。番号は注釈（compose_annotated）と
+    コメント一覧で同じものを使う。anchored_cids は本文の HTML に現れる cid
+    （body_cids の結果）。
+    """
+    cids = anchored_cids or set()
+    numbers: dict[str, int] = {}
+    n = 0
+    for c in session["comments"]:
+        if _is_anchored(c, cids):
+            n += 1
+            numbers[c["id"]] = n
+    return numbers
+
+
+def _comment_view(
+    comment: dict[str, Any], number: int | None, anchored: bool = True
+) -> dict[str, Any]:
     """コメント1件をAI向けの形に整える。
 
     tag はコメントの種類。"issue"（指摘）は修正稿に反映するもの、
@@ -377,6 +430,9 @@ def _comment_view(comment: dict[str, Any], number: int) -> dict[str, Any]:
         view["screenshot_size"] = comment.get("screenshot_size", [])
         view["region"] = comment.get("region", {})
         view["texts"] = comment.get("texts", [])
+    # 未アンカーのAIコメントは quote だけを持ち、本文の番号・マーカーは無い
+    if not anchored:
+        view["anchored"] = False
     return view
 
 
@@ -389,10 +445,13 @@ def build_html_feedback(session: dict[str, Any]) -> dict[str, Any]:
     該当箇所を特定する。quote はソース上でタグを跨いでいる場合がある。
     """
     rev = session["revisions"][-1]
-    comment_numbers = {c["id"]: i for i, c in enumerate(session["comments"], 1)}
+    # HTMLレビューは本文を span.cmt で包まないので、本文由来のアンカーは無い
+    anchored_cids: set[str] = set()
+    comment_numbers = _comment_numbers(session, anchored_cids)
     comments = []
     for c in session["comments"]:
-        view = _comment_view(c, comment_numbers[c["id"]])
+        anchored = _is_anchored(c, anchored_cids)
+        view = _comment_view(c, comment_numbers.get(c["id"]), anchored)
         view["prefix"] = c.get("prefix", "")
         view["suffix"] = c.get("suffix", "")
         comments.append(view)
@@ -456,20 +515,25 @@ def build_feedback(session: dict[str, Any]) -> dict[str, Any]:
     rev = session["revisions"][-1]
     base_text = rev["base_text"]
     html = rev.get("edited_html")
-    comment_numbers = {c["id"]: i for i, c in enumerate(session["comments"], 1)}
     if html:
         paragraphs = parse_edited_html(html)
+        anchored_cids = body_cids(paragraphs)
+        comment_numbers = _comment_numbers(session, anchored_cids)
         original = compose_original(paragraphs)
         result = compose_result(paragraphs)
         annotated = compose_annotated(paragraphs, comment_numbers)
         changes = compose_changes(paragraphs)
     else:
+        anchored_cids = set()
+        comment_numbers = _comment_numbers(session, anchored_cids)
         original = base_text
         result = base_text
         annotated = escape_markers(base_text)
         changes = []
     comments = [
-        _comment_view(c, comment_numbers[c["id"]]) for c in session["comments"]
+        _comment_view(c, comment_numbers.get(c["id"]),
+                      _is_anchored(c, anchored_cids))
+        for c in session["comments"]
     ]
     return {
         "session_id": session["id"],

@@ -1181,6 +1181,83 @@
     return { chunks: chunks, text: chunks.map((c) => c.clean).join('') };
   }
 
+  /* result_text 相当の索引。textIndex() に加えて <del>（削除済み文字）も
+     除く（result_text は削除を含まない）。<ins>（人間の挿入）は残す。
+     AIの add_comment の quote はこの索引（＝get_feedback の result_text）に
+     対して照合されているので、同じ土台で位置を復元する */
+  function resultIndex() {
+    const chunks = [];
+    let total = 0;
+    const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
+    let n;
+    while ((n = walker.nextNode())) {
+      if (closestEl(n, '.pb') || closestEl(n, '.img-para') ||
+          closestEl(n, '.ai-del') || inDel(n)) continue;
+      const clean = n.data.replace(/\u200B/g, '');
+      if (!clean) continue;
+      chunks.push({ node: n, start: total, clean: clean });
+      total += clean.length;
+    }
+    return { chunks: chunks, text: chunks.map((c) => c.clean).join('') };
+  }
+
+  /* AIが付けたコメントを本文に結び付ける。quote を result 索引から探し、
+     prefix/suffix で位置を一つに絞って Range を作り、人間と同じ
+     wrapRangeComment に渡す。見つからなければ false を返す。 */
+  function anchorAiComment(cid, quote, prefix, suffix) {
+    const q = String(quote || '').replace(/[\u200B\u00B6]/g, '');
+    if (!q) return false;
+    const idx = resultIndex();
+    const pre = String(prefix || '');
+    const suf = String(suffix || '');
+    const positions = [];
+    let from = 0;
+    for (;;) {
+      const i = idx.text.indexOf(q, from);
+      if (i < 0) break;
+      positions.push(i);
+      from = i + 1;
+    }
+    if (!positions.length) return false;
+    let at;
+    if (pre || suf) {
+      const combo = idx.text.indexOf(pre + q + suf);
+      at = combo >= 0 ? combo + pre.length
+        : bestContextMatch(idx.text, q, positions, pre, suf);
+    } else {
+      at = positions[0];
+    }
+    if (at == null) return false;
+    const s = pointAt(idx, at, false);
+    const e = pointAt(idx, at + q.length, true);
+    if (!s || !e) return false;
+    const r = document.createRange();
+    r.setStart(s.node, s.offset);
+    r.setEnd(e.node, e.offset);
+    return wrapRangeComment(r, cid);
+  }
+
+  /* 各出現位置の前後文脈が最もよく一致する位置を返す（サーバーと同じ） */
+  function bestContextMatch(text, q, positions, pre, suf) {
+    let best = null;
+    let bestScore = -1;
+    positions.forEach((pos) => {
+      const before = text.slice(Math.max(0, pos - pre.length), pos);
+      const after = text.slice(pos + q.length, pos + q.length + suf.length);
+      let score = 0;
+      for (let i = 0; i < before.length && i < pre.length; i++) {
+        if (before[before.length - 1 - i] === pre[pre.length - 1 - i]) score++;
+        else break;
+      }
+      for (let i = 0; i < after.length && i < suf.length; i++) {
+        if (after[i] === suf[i]) score++;
+        else break;
+      }
+      if (score > bestScore) { bestScore = score; best = pos; }
+    });
+    return best;
+  }
+
   /* 索引上のオフセットを (node, ノード内オフセット) に写す。
      ZWSP は索引に入っていないので、飛ばしながら数える */
   function pointAt(idx, offset, isEnd) {
@@ -1575,6 +1652,7 @@
     undo: undo,
     redo: redo,
     wrapRangeComment: wrapRangeComment,
+    anchorAiComment: anchorAiComment,
     addImageComment: addImageComment,
     unwrapComment: unwrapComment,
     insertImageParagraph: insertImageParagraph,

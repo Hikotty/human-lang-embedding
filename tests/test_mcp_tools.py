@@ -12,7 +12,7 @@ import urllib.request
 
 import pytest
 
-from hle_mcp import server, storage
+from hle_mcp import feedback, server, storage
 
 
 def test_open_review_creates_session_and_server(write_md):
@@ -159,7 +159,7 @@ def test_tools_registered_on_mcp_server():
     names = {t.name for t in result["tools"]}
     assert names >= {
         "open_review", "get_feedback", "submit_revision",
-        "reply_comment", "list_reviews", "get_review",
+        "reply_comment", "list_reviews", "get_review", "add_comment",
     }
 
 
@@ -202,6 +202,154 @@ def test_get_feedback_reports_comment_tags(write_md):
     fb = json.loads(server.get_feedback(sid))
     assert [(c["id"], c["tag"]) for c in fb["comments"]] \
         == [("c1", "issue"), ("c2", "question")]
+
+
+# ---------- add_comment（AIが本文の箇所を指してコメントする） ----------
+
+def _md_session(write_md, body: str, title: str = "AIコメント"):
+    out = json.loads(server.open_review(write_md(body), title))
+    return out["session_id"]
+
+
+def test_add_comment_md_success_marks_unanchored(write_md):
+    sid = _md_session(write_md, "これは重要な一文です。")
+    out = json.loads(server.add_comment(sid, "重要", "この語の意図は？",
+                                        tag="question"))
+    assert out["author"] == "ai"
+    assert out["anchored"] is False
+    assert out["tag"] == "question"
+    assert out["quote"] == "重要"
+    # 前後の文脈が prefix/suffix に入る（html-review と同じ 50文字規約）
+    assert out["suffix"].startswith("な一文です")
+    assert out["prefix"].endswith("これは")
+    # 保存層に author='ai'・anchored=False で入る
+    c = storage.load_session(sid)["comments"][0]
+    assert c["author"] == "ai" and c["anchored"] is False
+    # 未アンカーなので get_feedback では番号無し・anchored=false・quote のみ
+    fb = json.loads(server.get_feedback(sid))
+    v = fb["comments"][0]
+    assert v["anchored"] is False
+    assert v["number"] is None
+    assert v["quote"] == "重要"
+
+
+def test_add_comment_md_not_found_raises(write_md):
+    """本文に無い quote は not-found の ToolError（1つの誤入力を捕まえる）。"""
+    sid = _md_session(write_md, "これは重要な一文です。")
+    with pytest.raises(ValueError, match="見つかりません"):
+        server.add_comment(sid, "存在しない語", "コメント")
+    assert storage.load_session(sid)["comments"] == []
+
+
+def test_add_comment_md_cross_paragraph_raises(write_md):
+    """段落（改行）をまたぐ quote は明確に失敗する（この1誤入力を捕まえる）。"""
+    sid = _md_session(write_md, "一段落目です。\n二段落目です。")
+    with pytest.raises(ValueError, match="段落"):
+        server.add_comment(sid, "一段落目です。\n二段落目です。", "コメント")
+    assert storage.load_session(sid)["comments"] == []
+
+
+def test_add_comment_md_multi_match_requires_prefix_suffix(write_md):
+    """同じ quote が複数あって prefix/suffix 未指定なら件数入りで失敗する。"""
+    sid = _md_session(write_md, "赤。\n赤。\n赤。")
+    with pytest.raises(ValueError, match="3 箇所"):
+        server.add_comment(sid, "赤", "コメント")
+    assert storage.load_session(sid)["comments"] == []
+
+
+def test_add_comment_md_prefix_suffix_disambiguates(write_md):
+    """prefix/suffix を添えれば複数一致でも一意化できて成功する。"""
+    sid = _md_session(write_md, "青い空。\n赤い空。\n白い空。")
+    out = json.loads(server.add_comment(sid, "空", "この行の空", prefix="赤い",
+                                        suffix="。"))
+    assert out["anchored"] is False
+    # 2行目（赤い空。）を指している
+    assert out["prefix"].endswith("赤い")
+
+
+def test_add_comment_missing_session_raises():
+    """セッション不在は storage の KeyError がそのまま伝わる。"""
+    with pytest.raises(KeyError):
+        server.add_comment("missing0", "q", "t")
+
+
+def test_add_comment_rejects_empty_quote_and_text(write_md):
+    sid = _md_session(write_md, "本文です。")
+    with pytest.raises(ValueError):
+        server.add_comment(sid, "   ", "コメント")
+    with pytest.raises(ValueError):
+        server.add_comment(sid, "本文", "   ")
+    assert storage.load_session(sid)["comments"] == []
+
+
+def test_add_comment_resolves_against_edited_result_text(write_md):
+    """mdモードの照合は result_text（削除除去・人間の挿入を含む）に対して行う。"""
+    out = json.loads(server.open_review(write_md("原文の一文。"), "編集後"))
+    sid = out["session_id"]
+    # 人間が「原文」を削除し「改訂」を挿入 → result_text は「改訂の一文。」
+    storage.set_document(sid, "<p><del>原文</del><ins>改訂</ins>の一文。</p>")
+    assert feedback.build_feedback(storage.load_session(sid))["result_text"] \
+        == "改訂の一文。"
+    # 挿入語（改訂）は result_text にあるので指せる
+    res = json.loads(server.add_comment(sid, "改訂", "この語に注目"))
+    assert res["anchored"] is False
+    # 削除語（原文）は result_text に無いので指せない
+    with pytest.raises(ValueError, match="見つかりません"):
+        server.add_comment(sid, "原文", "削除済みは指せない")
+
+
+def test_add_comment_html_mode_success_and_not_found(write_md):
+    from tests.test_html_review import HTML_DOC
+
+    out = json.loads(server.open_review(write_md(HTML_DOC, name="d.html"), "図"))
+    sid = out["session_id"]
+    # タグを跨がない（空白寛容な）quote は通る
+    res = json.loads(server.add_comment(sid, "重要", "ここに注目",
+                                        prefix="これは", suffix="な点"))
+    assert res["mode"] == "html"
+    assert res["author"] == "ai"
+    # prefix/suffix は渡したものを尊重する
+    assert res["prefix"] == "これは" and res["suffix"] == "な点"
+    with pytest.raises(ValueError, match="見つかりません"):
+        server.add_comment(sid, "本文に無い語", "x")
+
+
+def test_add_comment_via_in_memory_client(write_md):
+    """インメモリMCPクライアント経由でも成功/失敗が反映される。"""
+    from tests.test_html_review import _call_tool
+
+    out = json.loads(server.open_review(write_md("重要な一文です。"), "Client経由"))
+    sid = out["session_id"]
+    ok = _call_tool("add_comment",
+                    {"session_id": sid, "quote": "重要", "text": "注目"})
+    assert ok.is_error is False
+    body = json.loads(ok.content[0].text)
+    assert body["author"] == "ai" and body["anchored"] is False
+    ng = _call_tool("add_comment",
+                    {"session_id": sid, "quote": "無い語", "text": "x"})
+    assert ng.is_error is True
+    assert "見つかりません" in ng.content[0].text
+
+
+def test_add_comment_tool_description_and_instructions():
+    """add_comment の用途とAI向け運用がツール説明・instructions にある。"""
+    from tests.test_mcp_tools import _tool_descriptions
+
+    d = _tool_descriptions()
+    assert "add_comment" in d
+    ac = d["add_comment"]
+    assert "author=\"ai\"" in ac
+    assert "質問" in ac and "指摘" in ac
+    # get_feedback の説明にも author と add_comment の運用がある
+    assert "add_comment" in d["get_feedback"]
+    assert "author==\"ai\"" in d["get_feedback"]
+    # instructions（ツールを呼ぶ前から見える）にも書いてある
+    instr = server.server.instructions
+    assert "add_comment" in instr
+    assert "author" in instr
+    # 既存の運用（質問は reply_comment で、傾向を skills へ）は残っている
+    assert "reply_comment" in instr
+    assert "skills" in instr
 
 
 # ---------- 画像・差分保存 ----------

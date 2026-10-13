@@ -355,6 +355,64 @@ def test_html_feedback_exposes_tag_and_explains_it():
     assert "reply_comment" in fb["note"]
 
 
+# ---------- AI著者コメントのアンカー状態 ----------
+
+def test_unanchored_ai_comment_has_no_number_and_quote_only():
+    """未アンカーのAIコメントは番号無し・anchored==False・quote のみ。"""
+    s = storage.create_session("これは重要な一文です。", "AIコメント", "/tmp/x")
+    storage.add_comment(s["id"], quote="重要", text="注目", author="ai",
+                        comment_id="a1", anchored=False)
+    fb = feedback.build_feedback(storage.load_session(s["id"]))
+    v = fb["comments"][0]
+    assert v["author"] == "ai"
+    assert v["anchored"] is False
+    assert v["number"] is None
+    assert v["quote"] == "重要"
+
+
+def test_anchored_ai_comment_gets_number_and_marker():
+    """本文に span.cmt が付いたAIコメントは番号と〖Cn〗が付く。"""
+    s = storage.create_session("これは重要な一文です。", "AIコメント", "/tmp/x")
+    storage.add_comment(s["id"], quote="重要", text="注目", author="ai",
+                        comment_id="a1", anchored=False)
+    # ブラウザが本文に結び付けた状態を模擬（span.cmt が入る）
+    storage.set_document(
+        s["id"], '<p>これは<span class="cmt" data-cid="a1">重要</span>な一文です。</p>')
+    fb = feedback.build_feedback(storage.load_session(s["id"]))
+    v = fb["comments"][0]
+    assert v["number"] == 1
+    assert "anchored" not in v  # 結び付いたら未アンカーの印は出さない
+    assert "〖C1〗重要〖/C1〗" in fb["annotated_text"]
+
+
+def test_numbering_skips_unanchored_ai_comment():
+    """未アンカーのAIコメントは連番を飛ばし、アンカー済みだけに番号が付く。"""
+    s = storage.create_session("赤い空と青い海。", "混在", "/tmp/x")
+    storage.add_comment(s["id"], quote="赤", text="人間指摘", comment_id="h1")
+    storage.add_comment(s["id"], quote="青", text="AI未アンカー", author="ai",
+                        comment_id="a1", anchored=False)
+    storage.set_document(
+        s["id"], '<p><span class="cmt" data-cid="h1">赤</span>い空と青い海。</p>')
+    fb = feedback.build_feedback(storage.load_session(s["id"]))
+    nums = {c["id"]: c["number"] for c in fb["comments"]}
+    assert nums["h1"] == 1       # アンカー済みの人間コメントは1番
+    assert nums["a1"] is None    # 未アンカーのAIコメントは番号無し
+
+
+def test_legacy_comment_without_author_defaults_human():
+    """author を持たない旧データは human 扱いで、常にアンカー済み。"""
+    s = storage.create_session("本文です。", "旧データ", "/tmp/x")
+    storage.add_comment(s["id"], quote="本文", text="旧", comment_id="c1")
+    # author キーを消して旧データを模擬
+    loaded = storage.load_session(s["id"])
+    loaded["comments"][0].pop("author")
+    storage.save_session(loaded)
+    v = feedback.build_feedback(storage.load_session(s["id"]))["comments"][0]
+    assert v["author"] == "human"
+    assert v["number"] == 1
+    assert "anchored" not in v
+
+
 # ---------- マーカー記号のエスケープ ----------
 def test_escape_markers_roundtrip():
     """【】〖〗と \\ を可逆にエスケープする。"""

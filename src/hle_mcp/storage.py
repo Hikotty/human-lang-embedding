@@ -215,13 +215,15 @@ def _compact_revision(session: dict[str, Any]) -> None:
     """
     from . import feedback as _feedback  # storage→feedbackの一方向依存
 
-    numbers = {c["id"]: i for i, c in enumerate(session["comments"], 1)}
     # 旧バージョンで作られたセッションも含め、未圧縮のリビジョンを全て圧縮する
     for rev in session["revisions"]:
         html = rev.get("edited_html")
         if not html:
             continue
         paragraphs = _feedback.parse_edited_html(html)
+        # 番号付けは feedback と同じ（本文に結び付いたコメントだけ連番）
+        numbers = _feedback._comment_numbers(
+            session, _feedback.body_cids(paragraphs))
         rev["feedback_summary"] = {
             "annotated_text": _feedback.compose_annotated(paragraphs, numbers),
             "result_text": _feedback.compose_result(paragraphs),
@@ -415,6 +417,7 @@ def add_comment(
     tag: str = DEFAULT_COMMENT_TAG,
     region: Any = None,
     texts: Any = None,
+    anchored: bool = True,
 ) -> dict[str, Any]:
     """コメントを追加する。comment_id はブラウザ側で採番したIDを受け入れる。
 
@@ -434,6 +437,14 @@ def add_comment(
     いた文字列。通常は add_region_comment で画像と一緒に保存する。
 
     tag はコメントの種類（"issue"=指摘・既定 / "question"=質問）。
+
+    anchored は、AIが付けたテキストコメント（author="ai"・target="text"）が
+    まだ本文の span.cmt に結び付いていない（未アンカー）ことを表す。既定の
+    True では従来どおりキーを増やさない。author="ai" かつ target="text" で
+    anchored=False のときだけ comment["anchored"]=False を書く。ブラウザの
+    エディタが本文に該当箇所を見つけてラップすると、保存される edited_html
+    側で人間コメントと同じ扱いになる（このキーは未アンカーの印として残り、
+    feedback 側が番号付けの判定に使う）。
     """
     if target not in COMMENT_TARGETS:
         raise ValueError(
@@ -481,6 +492,10 @@ def add_comment(
         # 既定（テキストへのコメント）ではキーを増やさず、従来の形を保つ
         if target != "text":
             comment["target"] = target
+        # AIが付けたテキストコメントで、まだ本文に span.cmt が無いものだけ
+        # 未アンカーの印を持たせる（人間コメント・アンカー済みは従来の形）
+        if author == "ai" and target == "text" and not anchored:
+            comment["anchored"] = False
         if name:
             comment["image"] = name
         if ref:

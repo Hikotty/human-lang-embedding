@@ -79,10 +79,15 @@ def reviewed():
     storage.add_comment(s["id"], "最後", "これは何？", comment_id="c2",
                         tag="question")
     storage.add_reply(s["id"], "c2", "締めの一文です。", author="ai")
+    # AIが本文の箇所を指して付けたコメント（カードに文字の「AI」バッジが付く）。
+    # 削除・追加の赤文字の見た目を変えないよう、地の文の span.cmt に結び付ける
+    storage.add_comment(s["id"], "です", "この語尾の意図は？", author="ai",
+                        comment_id="c3", tag="question", anchored=False)
     storage.set_document(
         s["id"],
         '<p><span class="cmt" data-cid="c1">本文</span>の<del>段落</del>'
-        '<ins>文章</ins>です。<span class="md-link">[リンク](https://x.test)</span></p>'
+        '<ins>文章</ins><span class="cmt" data-cid="c3">です</span>。'
+        '<span class="md-link">[リンク](https://x.test)</span></p>'
         '<p><span class="cmt" data-cid="c2">最後</span>の段落。</p>')
     return s["id"]
 

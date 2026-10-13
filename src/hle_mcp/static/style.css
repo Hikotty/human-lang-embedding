@@ -299,6 +299,10 @@ html, body {
 .comment-card .quote.img-quote span {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* 本文に結び付かない（未アンカーの）AIコメントの注記 */
+.comment-card .unanchored-note {
+  font-size: 11px; color: var(--text-2); margin: 0 0 6px;
+}
 .comment-card .who { font-weight: 700; font-size: 11px; margin-right: 6px; }
 .comment-card .who.ai { color: var(--blue); }
 .comment-card .who.human { color: var(--amber-text); }
