@@ -1,0 +1,32 @@
+mermaid.min.js の出所（このリポジトリに同梱している第三者ライブラリ）
+
+名前        : mermaid
+版          : 12.2.0（npm の latest。2026-10-13 公開）
+取得元      : https://registry.npmjs.org/mermaid/-/mermaid-12.2.0.tgz
+              （npm pack mermaid@12.2.0 で取得し、dist/mermaid.min.js を無加工で配置）
+SHA-256     : a8a6a6f805b074a8261a2825c86f99c8054acb3b35f50bb7e24a4f9f2c3c3b9f
+ライセンス  : MIT（全文は mermaid.LICENSE.txt。mermaid.min.js の末尾に、同梱された
+              依存ライブラリの MIT 等の表示も残っている）
+
+確認した脆弱性（GitHub の mermaid-js/mermaid の公開済み security advisory。
+2026-10-14 に確認）:
+  最新の公開は 2026-08-04。いずれも 11.16.1 で修正済みで、12.2.0 は
+  それより後の版（11.17.x → 12.0.0 → 12.1.0 → 12.2.0）にあたる。
+  - GHSA-6x64-9x62-f2gx / CVE-2026-50159 … 図の外の兄弟要素に効く CSS インジェクション
+  - GHSA-3rrr-jr9j-h3q3 / CVE-2026-71437 … architecture 図のプロトタイプ汚染
+  - GHSA-c4c3-pg64-4m4v / CVE-2026-71438 … 設定 API のプロトタイプ汚染
+  - GHSA-rhh3-jpg6-66xh / CVE-2026-71439, GHSA-2v8p-3f2j-5mp7 / CVE-2026-71436
+    … radar / XY チャートの DoS
+  - GHSA-ghcm-xqfw-q4vr / CVE-2026-41149, GHSA-87f9-hvmw-gh4p / CVE-2026-41159,
+    GHSA-xcj9-5m2h-648r / CVE-2026-41148 … classDef・設定のサニタイズ不備
+    （HTML / CSS インジェクション。11.15.0 で修正）
+  - GHSA-8gwm-58g9-j8pw / CVE-2025-54880, GHSA-7rqq-prvp-x9jh / CVE-2025-54881
+    … 図ラベルの XSS（11.10.0 で修正）
+
+このリポジトリでの使い方:
+  エディタのページでは動かさない。mermaid-frame.html（sandbox="allow-scripts"、
+  allow-same-origin なしの不透明オリジン、専用 CSP）の中だけで動かし、結果の
+  SVG を <img> の data: URL で見せる。設定は securityLevel: "strict"。
+  版を上げるときは、この表示（版・SHA-256・advisory の確認）も更新する。
+  tests/test_mermaid_serving.py が、mermaid.min.js の SHA-256 がここの値と
+  一致することを確かめる。

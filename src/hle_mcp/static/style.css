@@ -163,6 +163,38 @@ html, body {
 }
 /* フェンス行に上下の余白を持たせ、ブロック全体が箱に見えるようにする */
 #editor .md-fence { color: var(--text-3); padding: .3em .7em; }
+
+/* ---------- Mermaid の図 ----------
+   ```mermaid のブロックの直後に出す読み取り専用の表示（tracker.js）。
+   本文ではなく、保存されない。テキストを持たないので、読み込み中とエラーの
+   文言は疑似要素で出す。図は SVG を <img> に入れたもので、幅は本文の幅に
+   収まるよう縮める（高さは width/height の比のまま） */
+#editor .mmd-widget {
+  margin: .4em 0 1em; padding: 14px 16px; text-align: center; line-height: 0;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+  overflow-x: auto; user-select: none; -webkit-user-select: none;
+}
+#editor .mmd-widget img {
+  display: inline-block; max-width: 100%; height: auto; vertical-align: top;
+}
+#editor .mmd-widget[data-state="loading"]::after {
+  content: "Mermaid の図を描画しています…";
+  color: var(--text-2); font-size: .85rem; line-height: 1.6;
+}
+#editor .mmd-widget[data-state="error"] {
+  text-align: left; border-color: var(--red-border-soft); background: var(--red-tint);
+}
+#editor .mmd-widget[data-state="error"]::after {
+  content: "Mermaid の図を描画できません\A" attr(data-error);
+  display: block; white-space: pre-wrap; overflow-wrap: anywhere;
+  color: var(--red); font-size: .8rem; line-height: 1.6;
+}
+/* Mermaid を実行する隔離フレーム（mermaid-view.js が作る）。描画に必要な
+   レイアウトはさせるが、見えず・触れず・フォーカスも受けない */
+.mmd-frame {
+  position: fixed; top: 0; left: 0; width: 720px; height: 900px; border: 0;
+  opacity: 0; pointer-events: none; z-index: -1;
+}
 #editor .md-hr {
   border-bottom: 2px solid var(--divider); line-height: 1.2; margin: .6em 0;
 }

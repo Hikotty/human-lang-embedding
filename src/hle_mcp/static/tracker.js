@@ -10,6 +10,8 @@
  *   メディア段落: <p class="img-para" data-img="名前" data-kind="image|video|audio">
  *                 （中身は <img> / <video controls> / <audio controls>）
  *   メディアへのコメント: <p class="img-para" data-cids="cid1 cid2">
+ *   Mermaid の図: <div class="mmd-widget">（本文ではない。閉じフェンスの
+ *                 段落の直後に置く読み取り専用の表示で、保存しない）
  */
 (function () {
   'use strict';
@@ -250,6 +252,9 @@
   function cleanedClone() {
     const clone = editor.cloneNode(true);
     clone.querySelectorAll('.ai-del').forEach((el) => el.remove());
+    // Mermaid の図は本文ではない。<div> は feedback.py の逆変換で段落の区切りに
+    // なり空の行が増えるので、保存・スナップショットからは必ず落とす
+    clone.querySelectorAll('.mmd-widget').forEach((el) => el.remove());
     clone.querySelectorAll('.sel, .active, .cmt-active, .ai-ins-obj')
       .forEach((el) => {
         el.classList.remove('sel', 'active', 'cmt-active', 'ai-ins-obj');
@@ -268,6 +273,9 @@
     editor.focus({ preventScroll: true });
     restoreCaret(state.caret);
     changed();
+    // 図はスナップショットに入らず、差し替えで消えている。待たずに作り直す
+    // （結果はキャッシュにあるので、空の枠を見せずに済む）
+    syncMermaid();
   }
   function snapshot() {
     undoStack.push(captureState());
@@ -288,6 +296,7 @@
   function changed() {
     // AI差分表示中は、編集でずれた幽霊・青字の割り付けをやり直す
     if (aiDiffOps) applyAiOverlay();
+    scheduleMermaid();
     if (onChangeCb) onChangeCb();
   }
 
@@ -309,6 +318,7 @@
     while ((n = walker.nextNode())) {
       if (!n.length) continue;
       if (closestEl(n, '.ai-del')) continue; // AI差分の幽霊は本文ではない
+      if (closestEl(n, '.mmd-widget')) continue; // Mermaid の図は本文ではない
       if (!range.intersectsNode(n)) continue;
       if (range.comparePoint(n, 0) === 0 &&
           range.comparePoint(n, n.length) === 0) {
@@ -521,12 +531,12 @@
 
   function deleteParagraphBoundary(p, dir) {
     // dir<0: p の先頭で Backspace → 前の段落との境界を削除
-    const target = dir < 0 ? p.previousElementSibling : p;
+    const target = dir < 0 ? prevPara(p) : p;
     if (!target || target.tagName !== 'P') return;
     const insPb = trailingMarker(target, 'ins');
     if (insPb) {
       insPb.remove();
-      mergeParagraphs(target, target.nextElementSibling);
+      mergeParagraphs(target, nextPara(target));
       changed();
       return;
     }
@@ -547,11 +557,10 @@
     const curP = paraOf(r.startContainer);
     if (!pos || paraOf(pos.node) !== curP) {
       // 段落境界: 改行の削除として扱う
-      const p = dir < 0 ? curP : (curP && curP.nextElementSibling ? curP.nextElementSibling : null);
-      if (dir < 0 && curP && curP.previousElementSibling) {
+      if (dir < 0 && curP && prevPara(curP)) {
         deleteParagraphBoundary(curP, -1);
-      } else if (dir > 0 && curP && curP.nextElementSibling) {
-        deleteParagraphBoundary(curP.nextElementSibling, -1);
+      } else if (dir > 0 && curP && nextPara(curP)) {
+        deleteParagraphBoundary(nextPara(curP), -1);
       } else {
         undoStack.pop(); // 変化なし
       }
@@ -803,6 +812,17 @@
   }
 
   function onEditorClick(e) {
+    const mmd = e.target.closest && e.target.closest('.mmd-widget');
+    if (mmd && editor.contains(mmd)) {
+      // Mermaid の図は contenteditable=false で選択もできない。何もしないと、
+      // 未フォーカスのまま続けた入力が文書の先頭に飛ぶ（画像と同じ罠）。
+      // 図の隣（直後の段落の先頭、なければ直前の段落の末尾）にキャレットを置く
+      selectImage(null);
+      editor.focus({ preventScroll: true });
+      const near = nearestTextPara(topLevelIndex(mmd, 0));
+      if (near) caretAtParaEdge(near.p, near.atEnd);
+      return;
+    }
     const p = e.target.closest && e.target.closest('.img-para');
     const hit = playerParaOf(e.target);
     if (hit) {
@@ -1172,7 +1192,7 @@
     let n;
     while ((n = walker.nextNode())) {
       if (closestEl(n, '.pb') || closestEl(n, '.img-para') ||
-          closestEl(n, '.ai-del')) continue;
+          closestEl(n, '.ai-del') || closestEl(n, '.mmd-widget')) continue;
       const clean = n.data.replace(/\u200B/g, '');
       if (!clean) continue;
       chunks.push({ node: n, start: total, clean: clean });
@@ -1192,7 +1212,8 @@
     let n;
     while ((n = walker.nextNode())) {
       if (closestEl(n, '.pb') || closestEl(n, '.img-para') ||
-          closestEl(n, '.ai-del') || inDel(n)) continue;
+          closestEl(n, '.ai-del') || closestEl(n, '.mmd-widget') ||
+          inDel(n)) continue;
       const clean = n.data.replace(/\u200B/g, '');
       if (!clean) continue;
       chunks.push({ node: n, start: total, clean: clean });
@@ -1592,6 +1613,188 @@
     return aiDiffOps.dels.length + aiDiffOps.inss.length;
   }
 
+  // ---------- Mermaid 図 ----------
+  // コードフェンスの言語が mermaid のブロックの直後に、描画した図を読み取り専用の
+  // ウィジェット（div.mmd-widget）として挟む。ソースのテキストは今までどおり
+  // 本文に残り、校正（削除・追加・コメント）はソースに対して行う。
+  //
+  // 図は本文ではない。保存とスナップショットからは cleanedClone で必ず落とす
+  // （<div> は feedback.py の逆変換で段落の区切りになり、空の行が増えるため）。
+  // 段落（<p>）の隣に <div> が挟まるので、前後の段落を辿る処理は prevPara /
+  // nextPara を使う。ウィジェットはテキストノードを持たない（ラベルの文言は
+  // CSS の疑似要素で出す）ので、コメントの索引や範囲の走査には現れない。
+  //
+  // ブロックの検出は、class ではなく今の結果の文字列（削除を除き追加を含む。
+  // feedback.py の result_text と同じ規約）の行から行う。人間が編集しても
+  // 図が「今の本文」に追従する。閉じていないフェンスは図にしない（書きかけの
+  // フェンスが文書の残り全部を図にしてしまうのを避ける）。
+  const MMD_DEBOUNCE = 400;
+  const MMD_FENCE = /^\s*(`{3,}|~{3,})(.*)$/;
+  let mmdTimer = null;
+
+  function isMmdWidget(el) {
+    return !!el && el.nodeType === 1 && el.classList.contains('mmd-widget');
+  }
+  function prevPara(p) {
+    let e = p.previousElementSibling;
+    while (isMmdWidget(e)) e = e.previousElementSibling;
+    return e;
+  }
+  function nextPara(p) {
+    let e = p.nextElementSibling;
+    while (isMmdWidget(e)) e = e.nextElementSibling;
+    return e;
+  }
+
+  /* 段落の「今の結果」の文字列。削除・改行マーカー・AI差分の幽霊は含めない */
+  function paraResultText(p) {
+    let s = '';
+    const walker = document.createTreeWalker(p, NodeFilter.SHOW_TEXT);
+    let n;
+    while ((n = walker.nextNode())) {
+      if (closestEl(n, '.pb') || closestEl(n, '.ai-del') || inDel(n)) continue;
+      s += n.data;
+    }
+    return s.replace(/\u200B/g, '').replace(/\u00a0/g, ' ').replace(/\n/g, '');
+  }
+
+  /* 結果の行と、その行を構成する最後の段落（図を置く位置）の一覧。
+     人間が削除した改行（del.pb）は次の段落と同じ行になり、削除指定の
+     メディアは行ごと消える（feedback.py の _compose_lines の result と同じ） */
+  function resultLines() {
+    const lines = [];
+    let mergePrev = false;
+    for (let el = editor.firstElementChild; el; el = el.nextElementSibling) {
+      if (el.tagName !== 'P') continue;
+      let text;
+      let mergeNext = false;
+      if (el.classList.contains('img-para')) {
+        if (el.dataset.del) { mergePrev = false; continue; }
+        text = '';
+      } else {
+        text = paraResultText(el);
+        mergeNext = !!trailingMarker(el, 'del');
+      }
+      if (lines.length && mergePrev) {
+        lines[lines.length - 1].text += text;
+        lines[lines.length - 1].para = el;
+      } else {
+        lines.push({ text: text, para: el });
+      }
+      mergePrev = mergeNext;
+    }
+    return lines;
+  }
+
+  /* ```mermaid ... ``` のブロックを {source, anchor} の配列で返す。
+     anchor は閉じフェンスの行の最後の段落（図はその直後に置く） */
+  function findMermaidBlocks(lines) {
+    const blocks = [];
+    let open = null;
+    lines.forEach((L) => {
+      const m = L.text.match(MMD_FENCE);
+      if (!open) {
+        // 開きフェンス。バッククォートのフェンスは info に ` を含められない
+        if (!m || (m[1][0] === '`' && m[2].indexOf('`') >= 0)) return;
+        const lang = (m[2].trim().split(/\s+/)[0] || '').toLowerCase();
+        open = { ch: m[1][0], len: m[1].length, mermaid: lang === 'mermaid', src: [] };
+        return;
+      }
+      if (m && m[1][0] === open.ch && m[1].length >= open.len && !m[2].trim()) {
+        const source = open.src.join('\n');
+        if (open.mermaid && source.trim()) {
+          blocks.push({ source: source, anchor: L.para });
+        }
+        open = null;
+        return;
+      }
+      if (open.mermaid) open.src.push(L.text);
+    });
+    return blocks;
+  }
+
+  function makeMermaidWidget() {
+    const w = document.createElement('div');
+    w.className = 'mmd-widget';
+    w.contentEditable = 'false';
+    w.setAttribute('role', 'img');
+    w.setAttribute('aria-label', 'Mermaid の図');
+    return w;
+  }
+
+  /* 描画結果をウィジェットに反映する。失敗したときは図の代わりにエラーの
+     文言を出す（CSS の疑似要素。ソースのテキストは本文にそのまま残っている） */
+  function showMermaid(w, res) {
+    let img = w.querySelector('img');
+    if (res.ok) {
+      if (!img) {
+        img = document.createElement('img');
+        img.alt = '';
+        img.draggable = false;
+        img.addEventListener('error', () => showMermaid(w, {
+          ok: false, error: '描画した図の画像を読み込めませんでした' }));
+        w.appendChild(img);
+      }
+      img.width = res.width;
+      img.height = res.height;
+      img.src = res.url;
+      w.dataset.state = 'ok';
+      w.removeAttribute('data-error');
+      w.setAttribute('aria-label', 'Mermaid の図');
+    } else {
+      if (img) img.remove();
+      w.dataset.state = 'error';
+      w.dataset.error = res.error;
+      w.setAttribute('aria-label', 'Mermaid の図を描画できません: ' + res.error);
+    }
+  }
+
+  function updateMermaidWidget(w, source) {
+    const theme = window.MermaidView.theme();
+    const key = theme + '\u0000' + source;
+    if (w.dataset.key === key) return;
+    w.dataset.key = key;
+    const hit = window.MermaidView.peek(source, theme);
+    if (hit) { showMermaid(w, hit); return; }
+    if (!w.dataset.state) w.dataset.state = 'loading';
+    window.MermaidView.render(source, theme).then((res) => {
+      if (w.dataset.key === key) showMermaid(w, res);  // 古い依頼の結果は捨てる
+    });
+  }
+
+  /* 今の本文に合わせて図の数・位置・中身を整える。すでに正しい位置にある
+     ウィジェットは動かさずに使い回す（動かすと <img> を作り直すことになる） */
+  function syncMermaid() {
+    clearTimeout(mmdTimer);
+    mmdTimer = null;
+    if (!editor || !window.MermaidView) return;
+    const blocks = findMermaidBlocks(resultLines());
+    const widgets = Array.prototype.filter.call(editor.children, isMmdWidget);
+    const taken = new Set();
+    const slots = blocks.map((b) => {
+      const next = b.anchor.nextElementSibling;
+      if (isMmdWidget(next) && !taken.has(next)) { taken.add(next); return next; }
+      return null;
+    });
+    const spare = widgets.filter((w) => !taken.has(w));
+    blocks.forEach((b, i) => {
+      let w = slots[i];
+      if (!w) {
+        w = spare.shift() || makeMermaidWidget();
+        b.anchor.after(w);
+      }
+      updateMermaidWidget(w, b.source);
+    });
+    spare.forEach((w) => w.remove());
+  }
+
+  /* 編集のたびに呼ばれる。連続する入力のあいだは描き直さず、止まってから1回だけ */
+  function scheduleMermaid() {
+    if (!window.MermaidView) return;
+    clearTimeout(mmdTimer);
+    mmdTimer = setTimeout(syncMermaid, MMD_DEBOUNCE);
+  }
+
   // ---------- 初期化 ----------
   function renderBase(text) {
     editor.textContent = '';
@@ -1645,6 +1848,14 @@
     editor.addEventListener('focusin', onEditorFocusIn);
     editor.addEventListener('dragover', onDragOver);
     editor.addEventListener('drop', onDrop);
+    // Mermaid の図は配色に合わせて描き直す（ライト ⇄ ダーク）
+    document.addEventListener('hle-theme', () => {
+      editor.querySelectorAll('.mmd-widget').forEach((w) => {
+        delete w.dataset.key;
+      });
+      syncMermaid();
+    });
+    syncMermaid();
   }
 
   window.Tracker = {

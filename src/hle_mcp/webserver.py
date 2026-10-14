@@ -39,6 +39,7 @@ _CONTENT_TYPES = {
     ".css": "text/css; charset=utf-8",
     ".js": "application/javascript; charset=utf-8",
     ".svg": "image/svg+xml",
+    ".txt": "text/plain; charset=utf-8",
     # 添付メディア（画像・動画・音声）の型は storage.MEDIA_TYPES に一本化
     **{ext: mime for ext, (_, mime) in storage.MEDIA_TYPES.items()},
 }
@@ -67,6 +68,15 @@ _CSP_HTML = (
     "img-src 'self' data:; media-src 'self'; connect-src 'self'; "
     "form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
 )
+# 校正エディタ（mdセッション）用。本文の Mermaid 記法を描く隔離フレーム
+# （/static/mermaid-frame.html）を同一オリジンで埋め込むため frame-src 'self' を
+# 足す（それ以外は _CSP_HTML と同一）。スクリプトとスタイルは緩めない。
+_CSP_HTML_EDITOR = (
+    "default-src 'none'; script-src 'self'; style-src 'self'; "
+    "img-src 'self' data:; media-src 'self'; connect-src 'self'; "
+    "frame-src 'self'; "
+    "form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
+)
 # HTMLレビューページ用。レビュー対象HTMLを同一オリジンのiframeで埋め込むため
 # frame-src 'self' を許可する（それ以外は _CSP_HTML と同一）。
 _CSP_HTML_REVIEW = (
@@ -83,6 +93,21 @@ _CSP_FRAME_DOC = (
     "img-src 'self' data:; media-src data:; font-src data:; "
     "form-action 'none'; base-uri 'none'; frame-ancestors 'self'"
 )
+# Mermaid を実行する隔離フレーム自身のCSP。エディタが sandbox="allow-scripts"
+# （allow-same-origin なし = 不透明オリジン）で埋め込む。Mermaid は描画結果の
+# SVG に <style> とインラインの style 属性を入れるため style-src 'unsafe-inline'
+# が要る（このフレームの中だけ。エディタ本体の style-src 'self' は変えない）。
+# スクリプトは同一ホストの静的ファイル（mermaid.min.js と mermaid-frame.js）だけで、
+# 'unsafe-eval' も 'unsafe-inline'（script）も許さない。通信は一切できない
+# （connect-src を含め default-src 'none' のまま）。画像は SVG 内の data: のみ。
+# frame-ancestors 'self' で自オリジンのページからの埋め込みだけを許す。
+_CSP_MERMAID_FRAME = (
+    "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; "
+    "img-src data:; font-src data:; "
+    "form-action 'none'; base-uri 'none'; frame-ancestors 'self'"
+)
+# 隔離フレームとして配信する静的ファイル名（X-Frame-Options も SAMEORIGIN にする）
+_MERMAID_FRAME_PAGE = "mermaid-frame.html"
 # HTML以外（JSON・画像・静的アセット）はすべて禁止で足りる。
 _CSP_STRICT = "default-src 'none'; frame-ancestors 'none'"
 
@@ -375,7 +400,9 @@ class _Handler(BaseHTTPRequestHandler):
     def _send_error_json(self, status: int, message: str) -> None:
         self._send_json({"error": message}, status)
 
-    def _send_file(self, path: Path, csp: str | None = None) -> None:
+    def _send_file(
+        self, path: Path, csp: str | None = None, frameable: bool = False
+    ) -> None:
         if not path.is_file():
             self._send_error_json(404, "ファイルが見つかりません")
             return
@@ -389,6 +416,7 @@ class _Handler(BaseHTTPRequestHandler):
             _CONTENT_TYPES.get(path.suffix, "application/octet-stream"),
             200,
             csp,
+            frameable=frameable,
         )
 
     def _send_media(self, path: Path) -> None:
@@ -500,12 +528,21 @@ class _Handler(BaseHTTPRequestHandler):
                     _STATIC_DIR / "html-review.html", csp=_CSP_HTML_REVIEW
                 )
             else:
-                self._send_file(_STATIC_DIR / "index.html")
+                self._send_file(
+                    _STATIC_DIR / "index.html", csp=_CSP_HTML_EDITOR
+                )
         elif parsed.path == "/admin":
             self._send_file(_STATIC_DIR / "admin.html")
         elif len(parts) == 2 and parts[0] == "static":
             name = Path(parts[1]).name  # パストラバーサル防止
-            self._send_file(_STATIC_DIR / name)
+            if name == _MERMAID_FRAME_PAGE:
+                # 校正エディタが埋め込む Mermaid の隔離フレーム。専用のCSPで、
+                # 自オリジンのページからの埋め込みだけを許す
+                self._send_file(
+                    _STATIC_DIR / name, csp=_CSP_MERMAID_FRAME, frameable=True
+                )
+            else:
+                self._send_file(_STATIC_DIR / name)
         elif parsed.path == "/api/health":
             self._send_json(health_payload())
         elif parsed.path == "/api/media":
@@ -985,7 +1022,9 @@ def self_test() -> None:
         base = f"http://127.0.0.1:{srv.server_address[1]}"
         paths = ["/api/health", "/api/media", "/api/settings", "/", "/admin",
                  "/static/theme.js", "/static/app.js",
-                 "/static/tracker.js", "/api/sessions?limit=1"]
+                 "/static/tracker.js", "/static/mermaid-view.js",
+                 "/static/mermaid-frame.html", "/static/mermaid-frame.js",
+                 "/static/mermaid.min.js", "/api/sessions?limit=1"]
         with _LOCAL.open(base + paths[-1], timeout=10) as res:
             sessions = json.loads(res.read().decode("utf-8"))["sessions"]
         for s in sessions:
