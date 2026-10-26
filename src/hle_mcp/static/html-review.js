@@ -940,14 +940,66 @@
       const pos = locate(idx, t);
       const r = pos && rangeFromOffsets(idx, pos.start, pos.end);
       if (!r) continue;
-      rangeElement(r).scrollIntoView({ behavior: 'smooth', block: 'center' });
-      const win = frameWin();
-      if (win && win.CSS && win.CSS.highlights && win.Highlight) {
-        win.CSS.highlights.set('hle-jump', new win.Highlight(r));
-      }
+      showJump(r);
+      return;
+    }
+    // 引用文そのものが書き換わっていても、直前・直後の文脈は残っていることが
+    // 多い。その間が書き換わった場所なので、そこへ飛ぶ
+    const around = locateAround(idx, c, q.length);
+    const ar = around && rangeFromOffsets(idx, around.start, around.end);
+    if (ar) {
+      showJump(ar);
+      toast('第' + ((c.revision || 0) + 1) + '稿で付けた場所の付近へ飛びました' +
+        '（この部分は書き換わっています）');
       return;
     }
     toast('引用文が今のページに見つかりません（書き換わっています）');
+  }
+
+  /* 飛び先へスクロールし、範囲を一時的に強調する */
+  function showJump(range) {
+    rangeElement(range).scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const win = frameWin();
+    if (win && win.CSS && win.CSS.highlights && win.Highlight) {
+      win.CSS.highlights.set('hle-jump', new win.Highlight(range));
+    }
+  }
+
+  /* 引用文が見つからないとき、保存してある直前（prefix）・直後（suffix）の
+     文脈の一部を今のページから探し、コメントを付けた場所の字位置を求める。
+     両方見つかれば、その間（書き換わった部分）。片方だけなら、見つかった側から
+     引用文の長さ分。文脈が短い・見つからない・離れすぎなら null */
+  function locateAround(idx, c, quoteLen) {
+    const pre = String(c.prefix || '');
+    const suf = String(c.suffix || '');
+    let preEnd = -1;
+    let sufStart = -1;
+    [24, 12].forEach((n) => {
+      if (preEnd < 0 && pre.length >= n) {
+        const i = idx.text.indexOf(pre.slice(-n));
+        if (i >= 0) preEnd = i + n;
+      }
+      if (sufStart < 0 && suf.length >= n) {
+        const i = idx.text.indexOf(suf.slice(0, n));
+        if (i >= 0) sufStart = i;
+      }
+    });
+    const len = Math.max(quoteLen, 1);
+    const total = idx.text.length;
+    if (preEnd >= 0 && sufStart >= preEnd && sufStart - preEnd <= 2000) {
+      // 間が空（引用文が消えた）なら、前後の少しだけを示す
+      if (sufStart === preEnd) {
+        return { start: Math.max(0, preEnd - 12), end: Math.min(total, sufStart + 12) };
+      }
+      return { start: preEnd, end: sufStart };
+    }
+    if (preEnd >= 0 && sufStart < 0 && preEnd < total) {
+      return { start: preEnd, end: Math.min(total, preEnd + len) };
+    }
+    if (sufStart >= 0 && preEnd < 0 && sufStart > 0) {
+      return { start: Math.max(0, sufStart - len), end: sufStart };
+    }
+    return null;
   }
 
   function clearJumpHighlight() {

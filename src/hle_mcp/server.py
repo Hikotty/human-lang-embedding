@@ -692,6 +692,17 @@ def list_reviews(query: str = "", workspace: str = "", limit: int = 20) -> str:
     return _dumps({"count": len(sessions), "sessions": sessions})
 
 
+def _summary_for_ai(summary: dict | None) -> dict | None:
+    """差分要約からエディタ専用の項目（comment_spans）を除いてAIに返す。
+
+    comment_spans は新しい稿でコメントの場所へ飛ぶための文字位置で、AIには
+    使い道が無くコンテキストを増やすだけなので渡さない。
+    """
+    if not summary:
+        return summary
+    return {k: v for k, v in summary.items() if k != "comment_spans"}
+
+
 @server.tool()
 def get_review(session_id: str) -> str:
     """セッションの詳細（メタ情報・全リビジョン・全コメント）を取得する。
@@ -708,7 +719,7 @@ def get_review(session_id: str) -> str:
             "created_at": r["created_at"],
             "base_text": r["base_text"],
             "has_edits": bool(r.get("edited_html")),
-            "feedback_summary": r.get("feedback_summary"),
+            "feedback_summary": _summary_for_ai(r.get("feedback_summary")),
         }
         for r in session["revisions"]
     ]

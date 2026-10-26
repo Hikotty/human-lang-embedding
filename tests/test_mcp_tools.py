@@ -444,6 +444,10 @@ def test_submit_revision_compacts_and_accepts_images(png_file, write_md):
     # get_review が過去の差分要約を返す
     detail = json.loads(server.get_review(sid))
     assert detail["revisions"][0]["feedback_summary"]["result_text"] == "初稿！。"
+    # エディタ専用の項目（コメントの文字位置）はAIに渡さない
+    assert "comment_spans" not in detail["revisions"][0]["feedback_summary"]
+    assert "comment_spans" in storage.load_session(sid)["revisions"][0][
+        "feedback_summary"]
 
 
 def test_submit_revision_keeps_stored_image_refs(png_file, write_md):

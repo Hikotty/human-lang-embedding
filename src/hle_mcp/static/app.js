@@ -933,8 +933,10 @@
   /* ---------- コメントの位置へ飛ぶ ---------- */
   /* 本文側のアンカー（.cmt span、画像段落の data-cids）はその稿の編集HTML
      にしか無い。AIが次の稿を出すと本文は作り直されてアンカーは消えるが、
-     コメントはセッションに残る。そこでアンカーが無いときは、引用文を今の
-     本文から探して飛び、見つけた範囲を一時的に強調する。 */
+     コメントはセッションに残る。そこでアンカーが無いときは、付けた当時の
+     場所を前の稿との差分で今の本文へ写して飛ぶ（文が書き換わっていても、
+     書き換わった場所に着く）。写せなければ引用文を今の本文から探す。
+     どちらも見つけた範囲を一時的に強調する。 */
   function jumpToComment(cid) {
     const anchored =
       document.querySelector('#editor .cmt[data-cid="' + cid + '"]') ||
@@ -958,18 +960,86 @@
       p.scrollIntoView({ behavior: 'smooth', block: 'center' });
       return;
     }
+    // 古い稿のコメントは、付けた当時の場所を差分で今の本文へ写して飛ぶ。
+    // 文が書き換わっていても、書き換わった場所（変更する前にあった所）に着く
+    const past = pastCommentSpan(c);
+    if (past) {
+      const rewritten = past.before !== past.after;
+      // 範囲が引用文に比べて極端に広い（本文が大きく書き換わった）ときは、
+      // 範囲全体を強調せず、先頭の行だけにとどめる
+      const wide = past.after.length > Math.max(600, past.before.length * 4);
+      const r = Tracker.rangeFromBase(past.start, wide ? past.start : past.end);
+      if (r) {
+        showJump(r);
+        if (rewritten) {
+          toast('第' + (c.revision + 1) + '稿で付けた場所へ飛びました' +
+            '（この部分は書き換わっています）');
+        }
+        return;
+      }
+    }
     const range = Tracker.findText(c.quote);
     if (!range) {
       toast('引用文が今の本文に見つかりません（書き換わっています）');
       return;
     }
+    showJump(range);
+  }
+
+  /* 飛び先へスクロールし、範囲を一時的に強調する。本文のDOMには触らず
+     （保存されるHTMLに残さない）ハイライトだけ重ねる */
+  function showJump(range) {
     const sc = range.startContainer;
     const el = sc.nodeType === Node.ELEMENT_NODE ? sc : sc.parentElement;
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    // 本文のDOMには触らず（保存されるHTMLに残さない）ハイライトだけ重ねる
     if (window.CSS && CSS.highlights && window.Highlight) {
       CSS.highlights.set('hle-jump', new Highlight(range));
     }
+  }
+
+  /* 古い稿に付けたテキストのコメントが、今の本文のどこに当たるかを求める。
+     コメントを付けた稿の最終テキスト（人間の校正を反映済み）での位置から、
+     後の稿の base_text へ差分で順に写し、今の本文の base_text 座標にする。
+     位置は、その稿を確定したときに保存した comment_spans を使い、無い古い
+     データは引用文で探す。写せなければ null（呼び出し側が引用文の一部で探す）。
+     戻り値は {start, end, before, after}。before は当時の対象の文字列、
+     after は今の本文でその位置にある文字列で、違えば書き換わっている */
+  function pastCommentSpan(c) {
+    const cur = session.revisions.length - 1;
+    const k = c.revision;
+    if (typeof k !== 'number' || k < 0 || k >= cur) return null;
+    const rev = session.revisions[k];
+    const sum = rev.feedback_summary;
+    let text = sum && typeof sum.result_text === 'string'
+      ? sum.result_text : String(rev.base_text || '');
+    let span = null;
+    const saved = sum && sum.comment_spans && sum.comment_spans[c.id];
+    if (Array.isArray(saved) && saved.length === 2 &&
+        saved[0] <= saved[1] && saved[1] <= text.length) {
+      span = { s: saved[0], e: saved[1] };
+    } else {
+      const q = String(c.quote || '').replace(/[\u200B\u00B6]/g, '').trim();
+      if (!q) return null;
+      let i = text.indexOf(q);
+      if (i < 0) {
+        // 人間が消した文字を含む引用は、校正後のテキストには無い。原稿側で探す
+        text = String(rev.base_text || '');
+        i = text.indexOf(q);
+      }
+      if (i < 0) return null;
+      span = { s: i, e: i + q.length };
+    }
+    const texts = [text];
+    for (let j = k + 1; j < cur; j++) texts.push(String(session.revisions[j].base_text || ''));
+    texts.push(Tracker.baseText());
+    const mapped = Tracker.followSpan(texts, span.s, span.e);
+    if (!mapped) return null;
+    return {
+      start: mapped.s,
+      end: mapped.e,
+      before: text.slice(span.s, span.e),
+      after: texts[texts.length - 1].slice(mapped.s, mapped.e)
+    };
   }
 
   function clearJumpHighlight() {

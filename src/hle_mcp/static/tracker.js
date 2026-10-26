@@ -1613,6 +1613,165 @@
     return aiDiffOps.dels.length + aiDiffOps.inss.length;
   }
 
+  // ---------- 前の稿で付けた場所を今の本文へ写す ----------
+  // AIが次の稿を出すと本文は作り直され、前の稿のコメントのアンカー（span.cmt）は
+  // 消える。引用文が書き換わっていると文字列では探せないが、前の稿の最終
+  // テキストと今の稿の base_text の差分をたどれば、コメントを付けた場所に
+  // 対応する位置は分かる（書き換わった文なら、その書き換わった範囲になる）。
+  // AI差分と同じ方式（行単位 → 変わった塊の中だけ文字単位）で一致を取る。
+
+  /* 2つのテキストで一致する塊 [{a, b, len}]（a・b はそれぞれの先頭からの
+     文字位置。どちらも昇順）を返す。全面的な書き換えで差分の上限を超えたら
+     null（位置を写せない）。書き換わった塊の中で似ていない行は一致なしとする */
+  function matchBlocks(aText, bText) {
+    const blocks = [];
+    const push = (a, b, len) => {
+      if (len <= 0) return;
+      const last = blocks[blocks.length - 1];
+      if (last && last.a + last.len === a && last.b + last.len === b) last.len += len;
+      else blocks.push({ a: a, b: b, len: len });
+    };
+    if (aText === bText) {
+      push(0, 0, aText.length);
+      return blocks;
+    }
+    const a = aText.split('\n');
+    const b = bText.split('\n');
+    const aStarts = [0];
+    a.forEach((l) => aStarts.push(aStarts[aStarts.length - 1] + l.length + 1));
+    const bStarts = [0];
+    b.forEach((l) => bStarts.push(bStarts[bStarts.length - 1] + l.length + 1));
+    const lineOps = myersOps(a, b, AI_LINE_LIMIT);
+    if (!lineOps) return null;
+    // 文字単位の一致を push する。似ていない（編集距離が長さの6割超）ときは
+    // 偶然の一致でノイズになるので、一致なしとして塊ごと書き換えと見なす
+    const charBlocks = (aStr, bStr, aBase, bBase) => {
+      const lim = Math.min(AI_CHAR_LIMIT,
+        Math.ceil((aStr.length + bStr.length) * 0.6) + 1);
+      const ops = myersOps(aStr, bStr, lim);
+      if (!ops) return;
+      let ap = 0;
+      let bp = 0;
+      let run = 0;
+      for (let k = 0; k < ops.length; k++) {
+        if (ops[k] === 0) { run++; ap++; bp++; continue; }
+        if (run) { push(aBase + ap - run, bBase + bp - run, run); run = 0; }
+        if (ops[k] < 0) ap++; else bp++;
+      }
+      if (run) push(aBase + ap - run, bBase + bp - run, run);
+    };
+    let ai = 0;
+    let bi = 0;
+    let i = 0;
+    while (i < lineOps.length) {
+      if (lineOps[i] === 0) {
+        // 一致した行。行末の改行は、両方に次の行があれば一致に含める
+        const nl = ai < a.length - 1 && bi < b.length - 1 ? 1 : 0;
+        push(aStarts[ai], bStarts[bi], a[ai].length + nl);
+        ai++; bi++; i++;
+        continue;
+      }
+      let dl = 0;
+      let il = 0;
+      while (i < lineOps.length && lineOps[i] !== 0) {
+        if (lineOps[i] < 0) dl++; else il++;
+        i++;
+      }
+      if (dl > 0 && il > 0) {
+        if (dl === il) {
+          // 行数が同じなら、先頭から順に組にして1行ずつ合わせる
+          for (let j = 0; j < dl; j++) {
+            charBlocks(a[ai + j], b[bi + j], aStarts[ai + j], bStarts[bi + j]);
+            if (j < dl - 1 || (ai + dl < a.length && bi + il < b.length)) {
+              push(aStarts[ai + j + 1] - 1, bStarts[bi + j + 1] - 1, 1);
+            }
+          }
+        } else {
+          // 行数が違う（行の追加・削除を伴う）ときは、塊をまとめて合わせる
+          charBlocks(a.slice(ai, ai + dl).join('\n'),
+            b.slice(bi, bi + il).join('\n'), aStarts[ai], bStarts[bi]);
+          if (ai + dl < a.length && bi + il < b.length) {
+            push(aStarts[ai + dl] - 1, bStarts[bi + il] - 1, 1);
+          }
+        }
+      }
+      ai += dl;
+      bi += il;
+    }
+    return blocks;
+  }
+
+  /* a の [s, e) を b の範囲に写す。一致した塊の中の端は、ずれを足すだけ。
+     書き換わった部分（塊と塊の間）にかかる端は、その書き換わった部分の
+     b 側の外側の端に寄せるので、文が丸ごと書き換わっていれば、その書き換え
+     後の範囲全体になる */
+  function mapSpan(blocks, bLen, s, e) {
+    const mapPoint = (p, isEnd) => {
+      let prevEndB = 0;
+      for (const k of blocks) {
+        const inside = isEnd ? (p > k.a && p <= k.a + k.len)
+          : (p >= k.a && p < k.a + k.len);
+        if (inside) return k.b + (p - k.a);
+        if (isEnd ? p <= k.a : p < k.a) return isEnd ? k.b : prevEndB;
+        prevEndB = k.b + k.len;
+      }
+      return isEnd ? bLen : prevEndB;
+    };
+    const ms = mapPoint(s, false);
+    return { s: ms, e: Math.max(ms, mapPoint(e, true)) };
+  }
+
+  /* texts[0] の [s, e) を、texts を順にたどって最後のテキストの範囲に写す。
+     途中で差分が取れない、または一致する所がまったく無い（全面的な書き換えで
+     手がかりが無い）ときは null */
+  function followSpan(texts, s, e) {
+    let span = { s: s, e: e };
+    for (let i = 0; i + 1 < texts.length; i++) {
+      const blocks = matchBlocks(texts[i], texts[i + 1]);
+      if (!blocks || !blocks.length) return null;
+      span = mapSpan(blocks, texts[i + 1].length, span.s, span.e);
+    }
+    return span;
+  }
+
+  /* 今の本文の base_text（人間の校正を除いた、AIが出したとおりのテキスト）。
+     followSpan の最後のテキストと、rangeFromBase の座標はこれに揃える */
+  function baseText() {
+    return baseIndex().lines.map((L) => L.text).join('\n');
+  }
+
+  /* base_text の [s, e) を DOM の Range にする。空の範囲（対象が丸ごと消えた
+     場所）は、その行全体にする。写せなければ null */
+  function rangeFromBase(s, e) {
+    const idx = baseIndex();
+    const n = idx.lines.length;
+    if (!n) return null;
+    const total = idx.starts[n] - 1;
+    s = Math.max(0, Math.min(s, total));
+    e = Math.max(s, Math.min(e, total));
+    if (e <= s) {
+      const li = aiLineOf(idx, s);
+      s = idx.starts[li];
+      e = s + idx.lines[li].text.length;
+    }
+    let sp = null;
+    for (let li = aiLineOf(idx, s); li < n && !sp; li++) {
+      const col = Math.max(0, s - idx.starts[li]);
+      sp = aiPointAt(idx.lines[li], col, false);
+    }
+    let ep = null;
+    for (let li = aiLineOf(idx, e); li >= 0 && !ep; li--) {
+      const L = idx.lines[li];
+      ep = aiPointAt(L, Math.min(e - idx.starts[li], L.text.length), true);
+    }
+    if (!sp || !ep) return null;
+    const r = document.createRange();
+    r.setStart(sp.node, sp.offset);
+    r.setEnd(ep.node, ep.offset);
+    if (r.collapsed) return null;
+    return r;
+  }
+
   // ---------- Mermaid 図 ----------
   // コードフェンスの言語が mermaid のブロックの直後に、描画した図を読み取り専用の
   // ウィジェット（div.mmd-widget）として挟む。ソースのテキストは今までどおり
@@ -1871,6 +2030,9 @@
     getRange: getRange,
     findText: findText,
     setAiDiff: setAiDiff,
+    followSpan: followSpan,
+    baseText: baseText,
+    rangeFromBase: rangeFromBase,
     html: function () {
       if (!editor) return '';
       // 選択・強調・AI差分といった一時的な表示状態は保存しない

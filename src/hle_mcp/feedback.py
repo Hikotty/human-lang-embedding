@@ -231,6 +231,61 @@ def compose_result(paragraphs: list[_Paragraph]) -> str:
     return _compose_lines(paragraphs, "result")
 
 
+def compose_result_spans(paragraphs: list[_Paragraph]) -> dict[str, list[int]]:
+    """各コメントの対象範囲を、compose_result の結果の文字位置で返す。
+
+    `{cid: [start, end]}`（end は含まない）。コメントを付けた文字に削除が
+    含まれるときは、削除された文字を除いた残りの範囲になる。対象がすべて
+    削除されていれば start == end（その地点）。画像段落のコメントは行全体。
+
+    AIが次の稿を出すと本文のアンカー（span.cmt）は消えるが、前の稿の
+    result_text とこの範囲があれば、新しい稿の中で「コメントを付けた場所」を
+    差分から割り出せる（エディタがカードのクリックで本文へ飛ぶのに使う）。
+    組み立ての規約は _compose_lines の "result" と同じにしてある。
+    """
+    spans: dict[str, list[int]] = {}
+
+    def touch(cids: tuple[str, ...], start: int, end: int) -> None:
+        for cid in cids:
+            if not cid:
+                continue
+            cur = spans.get(cid)
+            if cur is None:
+                spans[cid] = [start, end]
+            else:
+                cur[0] = min(cur[0], start)
+                cur[1] = max(cur[1], end)
+
+    pos = 0  # ここまでに組み立てた result_text の長さ
+    has_line = False
+    merge_prev = False  # 直前の行と結合するか（人間が改行を削除した場合）
+    for para in paragraphs:
+        if para.img is not None:
+            if para.img["del"]:
+                merge_prev = False
+                continue
+            merge_next = False
+        else:
+            merge_next = para.pb_del
+        if not (has_line and merge_prev):
+            if has_line:
+                pos += 1  # 行をつなぐ "\n"
+            has_line = True
+        if para.img is not None:
+            line_start = pos
+            pos += len(para.img["md"])
+            touch(tuple(para.img.get("cids", ())), line_start, pos)
+        else:
+            for seg in para.segments:
+                if seg.in_del:
+                    touch(seg.cids, pos, pos)
+                    continue
+                touch(seg.cids, pos, pos + len(seg.text))
+                pos += len(seg.text)
+        merge_prev = merge_next
+    return spans
+
+
 def compose_annotated(
     paragraphs: list[_Paragraph], comment_numbers: dict[str, int]
 ) -> str:

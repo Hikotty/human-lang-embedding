@@ -458,3 +458,82 @@ def test_build_feedback_escapes_base_text_without_edits():
     fb = feedback.build_feedback(storage.load_session(s["id"]))
     assert fb["result_text"] == "【下書き】です"
     assert fb["annotated_text"] == "\\【下書き\\】です"
+
+
+# ---------- コメントの場所（result_text の文字位置） ----------
+
+def _spans(html: str):
+    paras = feedback.parse_edited_html(html)
+    return feedback.compose_result(paras), feedback.compose_result_spans(paras)
+
+
+def _slice(result: str, span) -> str:
+    return result[span[0]:span[1]]
+
+
+def test_result_spans_plain_comment():
+    result, spans = _spans(
+        '<p>一行目</p><p>これは<span class="cmt" data-cid="c1">重要</span>です</p>')
+    assert result == "一行目\nこれは重要です"
+    assert _slice(result, spans["c1"]) == "重要"
+
+
+def test_result_spans_exclude_deleted_and_include_inserted():
+    """校正で消えた文字は範囲から外れ、足した文字は範囲に入る。"""
+    result, spans = _spans(
+        '<p>前<span class="cmt" data-cid="c1">あ<del>い</del><ins>う</ins>え</span>後</p>')
+    assert result == "前あうえ後"
+    assert _slice(result, spans["c1"]) == "あうえ"
+
+
+def test_result_spans_when_commented_text_fully_deleted():
+    """対象が丸ごと消えたコメントは、その地点（空の範囲）を指す。"""
+    result, spans = _spans(
+        '<p>前<span class="cmt" data-cid="c1"><del>消す</del></span>後</p>')
+    assert result == "前後"
+    assert spans["c1"] == [1, 1]
+
+
+def test_result_spans_follow_deleted_paragraph_break():
+    """人間が改行を削除して行がつながっても、位置は result_text に一致する。"""
+    html = ('<p>前半<del class="pb" data-pb="del">¶</del></p>'
+            '<p>後半の<span class="cmt" data-cid="c1">ここ</span>です</p>'
+            '<p>次の行</p>')
+    result, spans = _spans(html)
+    assert result == "前半後半のここです\n次の行"
+    assert _slice(result, spans["c1"]) == "ここ"
+
+
+def test_result_spans_skip_deleted_image_line():
+    """削除指定された画像の行は result_text に無いので、後ろの位置がずれない。"""
+    html = ("<p>前</p>" + _img_para("a.png", "![図](a.png)", del_=True)
+            + '<p>後の<span class="cmt" data-cid="c1">ここ</span></p>')
+    result, spans = _spans(html)
+    assert result == "前\n後のここ"
+    assert _slice(result, spans["c1"]) == "ここ"
+
+
+def test_result_spans_image_comment_covers_whole_line():
+    html = "<p>前</p>" + _img_para("a.png", "![図](a.png)", cids="c1")
+    result, spans = _spans(html)
+    assert _slice(result, spans["c1"]) == "![図](a.png)"
+
+
+def test_result_spans_comment_split_across_paragraphs():
+    """複数段落にまたがる範囲は、最初から最後までを指す。"""
+    html = ('<p>あ<span class="cmt" data-cid="c1">い</span></p>'
+            '<p><span class="cmt" data-cid="c1">う</span>え</p>')
+    result, spans = _spans(html)
+    assert result == "あい\nうえ"
+    assert _slice(result, spans["c1"]) == "い\nう"
+
+
+def test_compaction_saves_comment_spans():
+    """リビジョンを確定すると、コメントの場所が差分要約に残る。"""
+    s = storage.create_session("初稿の大事な一文です。", "d", "")
+    storage.add_comment(s["id"], quote="大事な", text="ここ", comment_id="c1")
+    storage.set_document(
+        s["id"], '<p>初稿の<span class="cmt" data-cid="c1">大事な</span>一文です。</p>')
+    storage.add_revision(s["id"], "第二稿。")
+    fs = storage.load_session(s["id"])["revisions"][0]["feedback_summary"]
+    assert _slice(fs["result_text"], fs["comment_spans"]["c1"]) == "大事な"

@@ -228,6 +228,9 @@ def _compact_revision(session: dict[str, Any]) -> None:
             "annotated_text": _feedback.compose_annotated(paragraphs, numbers),
             "result_text": _feedback.compose_result(paragraphs),
             "changes": _feedback.compose_changes(paragraphs),
+            # コメントを付けた場所（result_text の文字位置）。次の稿で本文が
+            # 書き換わっても、差分からその場所を割り出して飛ぶのに使う
+            "comment_spans": _feedback.compose_result_spans(paragraphs),
         }
         rev["edited_html"] = None
 
