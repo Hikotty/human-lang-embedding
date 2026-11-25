@@ -38,7 +38,13 @@ def test_starts_supervised_with_current_code(daemon):
     assert h["supervised"] is True
     assert h["version"] == h["disk_version"]
     assert h["update_error"] == ""
+    # ワーカーは READY を返す前に受付を始めるので、health が先に応え、状態ファイルは
+    # その直後に書かれる。書かれるまで待つ
+    end = time.monotonic() + 10
     st = daemon.status()
+    while "supervisor_pid" not in st and time.monotonic() < end:
+        time.sleep(0.1)
+        st = daemon.status()
     assert st["supervisor_pid"] == h["supervisor_pid"] == daemon.proc.pid
     assert st["worker_pid"] == h["pid"]
 
@@ -96,6 +102,24 @@ def test_code_failing_self_test_is_not_rolled_in(daemon):
     # 稼働中の（前の版の）ワーカーは管理画面を返せる
     with webserver._LOCAL.open(f"http://127.0.0.1:{daemon.port}/admin", timeout=5) as res:
         assert res.status == 200
+
+
+def test_failed_version_is_retried_when_missing_static_file_appears(daemon):
+    """自己テストが静的ファイルの不足で落ちた版は、そのファイルが置かれたら
+    Python のコードが同じままでも切り替わる（コードを先に、静的ファイルを後に
+    書いたときに、古い版のまま止まらない）。"""
+    before = daemon.health()
+    daemon.edit("webserver.py", lambda s: s.replace(
+        '"/static/theme.js", ', '"/static/theme.js", "/static/later.js", ', 1))
+    h = daemon.wait_for(lambda h: h and h["update_error"], 30, "自己テスト失敗の記録")
+    assert "/static/later.js が 404" in h["update_error"]
+    assert h["pid"] == before["pid"]
+    (daemon.pkg / "static" / "later.js").write_text("// later\n", encoding="utf-8")
+    fixed = daemon.wait_for(
+        lambda h: h and h["version"] == h["disk_version"] and not h["update_error"],
+        30, "ファイルが置かれたあとの切り替え")
+    assert fixed["pid"] != before["pid"]
+    assert "試し直します" in daemon.log_text()
 
 
 def test_crashed_worker_is_respawned(daemon):

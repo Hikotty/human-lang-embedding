@@ -86,6 +86,9 @@ class Supervisor:
     retiring: list[Worker] = field(default_factory=list)
     last_error: str = ""
     failed_version: str = ""
+    # 切り替えに失敗したときの静的ファイルの署名。自己テストは静的ファイルも
+    # 読むので、足りなかったファイルが後から置かれたら同じ版でも試し直す
+    failed_static: tuple | None = None
     stopping: bool = False
     sup_version: str = ""
     _pending_sig: tuple | None = None
@@ -125,6 +128,7 @@ class Supervisor:
         if new is None:
             self.last_error = err
             self.failed_version = target
+            self.failed_static = versioning.stat_signature(versioning.static_files())
             log(f"新しいワーカーの起動に失敗。現行のワーカーで配信を続けます: {err}")
             self.write_status()
             return
@@ -132,6 +136,7 @@ class Supervisor:
         self.current = new
         self.last_error = ""
         self.failed_version = ""
+        self.failed_static = None
         self._respawn_count = 0
         log(f"ワーカー {new.pid}（版 {new.version}）が配信を開始")
         if old is not None:
@@ -181,6 +186,9 @@ class Supervisor:
 
     def check_code(self, now: float) -> None:
         sig = versioning.stat_signature(versioning.py_files())
+        if self.failed_version:
+            # 失敗した版を試し直すかは静的ファイルでも決まるので、それも落ち着くまで待つ
+            sig += versioning.stat_signature(versioning.static_files())
         if sig != self._pending_sig:
             # 変化があった（または初回）。落ち着くまで待つ
             self._pending_sig = sig
@@ -192,6 +200,12 @@ class Supervisor:
             self.reexec()
             return
         target = versioning.code_version()
+        if target == self.failed_version and self.failed_static is not None and \
+                versioning.stat_signature(versioning.static_files()) != self.failed_static:
+            # 同じコードでも、静的ファイルが変わった（足りなかったファイルが置かれた）
+            # なら自己テストの結果は変わりうる。もう一度だけ試す
+            log("静的ファイルが変わったので、失敗した版への切り替えを試し直します")
+            self.failed_version = ""
         if target != self.current.version and target != self.failed_version:
             self.rollover(target)
 
