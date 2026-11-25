@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Math renderer</title>
+</head>
+<body>
+<!-- 校正エディタが sandbox="allow-scripts"（allow-same-origin なし）で埋め込む、
+     数式（MathJax）専用の隔離フレーム。不透明オリジンで動くので、本文の TeX を
+     解釈するライブラリの脆弱性が、エディタのページ（API を叩けるオリジン）に
+     届かない。スクリプトは同一ホストの 3 本だけ（CSP は webserver.py の
+     _CSP_MATH_FRAME）。拡張とフォントの追加分は /static/mathjax/ 以下から
+     MathJax 自身が読む。 -->
+<script src="/static/math-config.js"></script>
+<script src="/static/mathjax/tex-svg.js"></script>
+<script src="/static/math-frame.js"></script>
+</body>
+</html>

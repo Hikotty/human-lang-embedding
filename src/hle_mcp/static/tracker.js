@@ -12,6 +12,10 @@
  *   メディアへのコメント: <p class="img-para" data-cids="cid1 cid2">
  *   Mermaid の図: <div class="mmd-widget">（本文ではない。閉じフェンスの
  *                 段落の直後に置く読み取り専用の表示で、保存しない）
+ *   ブロックの数式: <div class="mth-widget">（同じく本文ではない。$$ ... $$ や
+ *                 ```math の閉じの段落の直後に置く表示で、保存しない）
+ *   文中の数式  : <span class="md-math">（$ 記号と TeX はテキストのまま残る。
+ *                 描画した式は CSS の疑似要素で出し、DOM のノードは増えない）
  */
 (function () {
   'use strict';
@@ -32,6 +36,8 @@
   let compIns = null;
   const ZWSP = '\u200B';
   const IMG_LINE = /^!\[([^\]]*)\]\(([^)\s]+)\)$/;
+  // 本文ではない読み取り専用の表示（Mermaid の図とブロックの数式）の div
+  const WIDGET_SEL = '.mmd-widget, .mth-widget';
 
   // ---------- マークダウン装飾 ----------
   // 記法の記号はDOMテキストとして保持したまま、CSSで視覚的に装飾する。
@@ -122,7 +128,7 @@
   function nearestTextPara(index) {
     const kids = editor.childNodes;
     const ok = (n) => !!n && n.nodeType === 1 && n.tagName === 'P' &&
-      !n.classList.contains('img-para');
+      !n.classList.contains('img-para') && !n.classList.contains('mth-hide');
     if (ok(kids[index])) return { p: kids[index], atEnd: false };
     if (ok(kids[index - 1])) return { p: kids[index - 1], atEnd: true };
     for (let i = index + 1; i < kids.length; i++) {
@@ -153,6 +159,8 @@
   function normalizeCaret() {
     const r = getRange();
     if (!r || !r.collapsed) return r;
+    // 塊として見せている式の中には文字を入れない（式の前後へ出す）
+    if (caretOutOfMath(r) || caretOutOfHiddenBlock(r)) return getRange();
     if (textParaOf(r.startContainer)) return r;
     const index = topLevelIndex(r.startContainer, r.startOffset);
     let hit = nearestTextPara(index);
@@ -254,11 +262,22 @@
     clone.querySelectorAll('.ai-del').forEach((el) => el.remove());
     // Mermaid の図は本文ではない。<div> は feedback.py の逆変換で段落の区切りに
     // なり空の行が増えるので、保存・スナップショットからは必ず落とす
-    clone.querySelectorAll('.mmd-widget').forEach((el) => el.remove());
+    clone.querySelectorAll(WIDGET_SEL).forEach((el) => el.remove());
     clone.querySelectorAll('.sel, .active, .cmt-active, .ai-ins-obj')
       .forEach((el) => {
         el.classList.remove('sel', 'active', 'cmt-active', 'ai-ins-obj');
       });
+    // 文中の数式の描画の状態（画像・大きさ・開いているか）は、本文ではない一時的な
+    // 表示。保存すると、開き直したときに古い状態が残る
+    clone.querySelectorAll('p.mth-hide').forEach((el) => {
+      el.classList.remove('mth-hide');
+      if (!el.className) el.removeAttribute('class');
+    });
+    clone.querySelectorAll('.md-math').forEach((el) => {
+      el.classList.remove('md-math-edit', 'md-math-sel');
+      ['data-mth', 'data-view', 'data-ai', 'title', 'style', 'contenteditable']
+        .forEach((a) => el.removeAttribute(a));
+    });
     return clone;
   }
 
@@ -273,6 +292,11 @@
     editor.focus({ preventScroll: true });
     restoreCaret(state.caret);
     changed();
+    // 差し替えた HTML は見え方を持たないので、式を塊に戻してから、キャレットが
+    // 隠れた TeX の中に入っていれば式の外へ出す
+    syncMath();
+    const caret = getRange();
+    if (caret && caret.collapsed && !caretOutOfMath(caret)) caretOutOfHiddenBlock(caret);
     // 図はスナップショットに入らず、差し替えで消えている。待たずに作り直す
     // （結果はキャッシュにあるので、空の枠を見せずに済む）
     syncMermaid();
@@ -299,6 +323,7 @@
     // AI差分表示中は、編集でずれた幽霊・青字の割り付けをやり直す
     if (aiDiffOps) applyAiOverlay();
     scheduleMermaid();
+    scheduleMath();
     scheduleCodeHighlight();
     if (onChangeCb) onChangeCb();
   }
@@ -321,7 +346,7 @@
     while ((n = walker.nextNode())) {
       if (!n.length) continue;
       if (closestEl(n, '.ai-del')) continue; // AI差分の幽霊は本文ではない
-      if (closestEl(n, '.mmd-widget')) continue; // Mermaid の図は本文ではない
+      if (closestEl(n, WIDGET_SEL)) continue; // 図・数式の表示は本文ではない
       if (!range.intersectsNode(n)) continue;
       if (range.comparePoint(n, 0) === 0 &&
           range.comparePoint(n, n.length) === 0) {
@@ -559,6 +584,9 @@
     const pos = findAdjacentText(r, dir);
     const curP = paraOf(r.startContainer);
     if (!pos || paraOf(pos.node) !== curP) {
+      // 隣が式だけを見せているブロックなら、式全体を削除にする
+      const blk = curP ? shownBlockNextTo(curP, dir) : null;
+      if (blk && deleteMathBlock(blk, curP, dir)) { changed(); return; }
       // 段落境界: 改行の削除として扱う
       if (dir < 0 && curP && prevPara(curP)) {
         deleteParagraphBoundary(curP, -1);
@@ -567,6 +595,12 @@
       } else {
         undoStack.pop(); // 変化なし
       }
+      return;
+    }
+    // 隣が塊として見せている式なら、TeX を 1 文字ずつではなく式全体を削除にする
+    const mathSpan = shownMathOf(pos.node);
+    if (mathSpan) {
+      if (deleteMathAtCaret(mathSpan, dir)) changed(); else undoStack.pop();
       return;
     }
     const [start, end] = charSpan(pos.node, pos.end);
@@ -815,9 +849,23 @@
   }
 
   function onEditorClick(e) {
-    const mmd = e.target.closest && e.target.closest('.mmd-widget');
+    const mth = e.target.closest && e.target.closest('.md-math');
+    if (mth && editor.contains(mth) && MATH_VIEWS[mth.dataset.view]) {
+      // 描いた式は塊として選ぶ（TeX は出さない。編集はダブルクリック）
+      selectImage(null);
+      selectMath(mth);
+      return;
+    }
+    const blk = e.target.closest && e.target.closest('.mth-widget');
+    if (blk && editor.contains(blk) && BLOCK_SHOWN[blk.dataset.view]) {
+      // 式だけを見せているブロックは、式全体を選ぶ（編集はダブルクリック）
+      selectImage(null);
+      selectMathBlock(blk);
+      return;
+    }
+    const mmd = e.target.closest && e.target.closest(WIDGET_SEL);
     if (mmd && editor.contains(mmd)) {
-      // Mermaid の図は contenteditable=false で選択もできない。何もしないと、
+      // 図・数式の表示は contenteditable=false で選択もできない。何もしないと、
       // 未フォーカスのまま続けた入力が文書の先頭に飛ぶ（画像と同じ罠）。
       // 図の隣（直後の段落の先頭、なければ直前の段落の末尾）にキャレットを置く
       selectImage(null);
@@ -996,9 +1044,132 @@
     return n > 0 ? ' md-in' + n : '';
   }
 
+  // ---------- 文中の数式（$...$） ----------
+  // 開きの $ の直後と閉じの $ の直前は空白でなく、閉じの $ の直後は数字でない
+  // （Pandoc と同じ規則。「$100 と $200」のような金額を数式にしないため）。
+  // \$ は数式の開きにならず、中の \$ は閉じにならない。1 行の中だけで探す
+  const MD_MATH =
+    /(?<![\\$])\$(?![\s$])((?:\\[\s\S]|[^$\\\n])+?)(?<!\s)\$(?![\d$])/g;
+  const MD_CODE_SPAN = /(`+)([^`\n]+?)\1/g;
+  // 数式 1 つを 1 文字に置き換えて、強調・リンクの解析から守る（私用領域の文字。
+  // 元の文に私用領域の文字があるときは置き換えない）
+  const MATH_TOKEN_BASE = 0xE000;
+  const MATH_TOKEN_MAX = 0x1000;
+  const MATH_TOKEN_CHAR = /[\uE000-\uF8FF]/;
+  const MATH_TOKEN_CHARS = /[\uE000-\uF8FF]/g;
+  // \text{…} などの中の日本語は数式の一部。それ以外に全角の文字があれば、数式
+  // ではなく文章（「$15000」…「３万$」のように $ で挟まれた文）と見なす
+  const MATH_TEXT_ARG =
+    /\\(?:text|textbf|textit|textrm|textsf|texttt|mathrm|mbox|hbox|operatorname)\s*\{[^{}]*\}/g;
+  const MATH_WIDE = /[\u3000-\u30ff\u3400-\u9fff\uf900-\ufaff\uff00-\uffef]/;
+
+  function looksLikeMath(body) {
+    return !!body.trim() && !MATH_WIDE.test(body.replace(MATH_TEXT_ARG, ''));
+  }
+
+  /* 1 行の文字列から文中の数式を探し、{start, end, body} の配列で返す（start と end は
+     $ を含む範囲）。コードスパンの中は数式として扱わない */
+  function findMathRanges(text) {
+    const found = [];
+    if (text.indexOf('$') < 0) return found;
+    const spans = [];
+    let c;
+    let from = 0;
+    const codeRe = new RegExp(MD_CODE_SPAN.source, 'g');
+    while ((c = codeRe.exec(text))) {
+      spans.push([from, c.index]);
+      from = c.index + c[0].length;
+    }
+    spans.push([from, text.length]);
+    spans.forEach((span) => {
+      const seg = text.slice(span[0], span[1]);
+      const re = new RegExp(MD_MATH.source, 'g');
+      let m;
+      while ((m = re.exec(seg))) {
+        if (!looksLikeMath(m[1]) || found.length >= MATH_TOKEN_MAX) {
+          re.lastIndex = m.index + 1; // 閉じの $ は、次の式の開きかもしれない
+          continue;
+        }
+        const start = span[0] + m.index;
+        found.push({ start: start, end: start + m[0].length, body: m[1] });
+      }
+    });
+    return found;
+  }
+
+  /* text の文中の数式を 1 文字に置き換えた文字列と、置き換えた式（TeX）の一覧を返す */
+  function tokenizeMath(text) {
+    if (text.indexOf('$') < 0 || MATH_TOKEN_CHAR.test(text)) {
+      return { text: text, math: [] };
+    }
+    const math = [];
+    let out = '';
+    let copied = 0;
+    findMathRanges(text).forEach((f) => {
+      out += text.slice(copied, f.start) +
+        String.fromCharCode(MATH_TOKEN_BASE + math.length);
+      copied = f.end;
+      math.push(f.body);
+    });
+    return { text: out + text.slice(copied), math: math };
+  }
+
+  /* 置き換えた文字を、元の $...$ に戻す（コードやリンク先の中の文字用） */
+  function untokenizeMath(s, math) {
+    if (!math.length) return s;
+    return s.replace(MATH_TOKEN_CHARS, (ch) => {
+      const body = math[ch.charCodeAt(0) - MATH_TOKEN_BASE];
+      return body === undefined ? ch : '$' + body + '$';
+    });
+  }
+
+  /* 文中の数式 1 つ。$ 記号は .md-mk、TeX は .md-mt のテキストとして残る
+     （原文を復元できる）。描画した式は syncMath が疑似要素で出す */
+  function appendMath(parent, body) {
+    const wrap = document.createElement('span');
+    wrap.className = 'md-math';
+    wrap.appendChild(mdMark('$'));
+    const src = document.createElement('span');
+    src.className = 'md-mt';
+    src.textContent = body;
+    wrap.appendChild(src);
+    wrap.appendChild(mdMark('$'));
+    parent.appendChild(wrap);
+  }
+
+  /* 装飾の無い文字列を追加する。置き換えた文字は数式に戻す */
+  function appendPlain(parent, s, math) {
+    if (!s) return;
+    if (!math.length || !MATH_TOKEN_CHAR.test(s)) {
+      parent.appendChild(document.createTextNode(s));
+      return;
+    }
+    let last = 0;
+    let m;
+    const re = new RegExp(MATH_TOKEN_CHARS.source, 'g');
+    while ((m = re.exec(s))) {
+      const body = math[m[0].charCodeAt(0) - MATH_TOKEN_BASE];
+      if (body === undefined) continue;
+      if (m.index > last) {
+        parent.appendChild(document.createTextNode(s.slice(last, m.index)));
+      }
+      appendMath(parent, body);
+      last = m.index + 1;
+    }
+    if (last < s.length) parent.appendChild(document.createTextNode(s.slice(last)));
+  }
+
   /* テキストにインライン記法の装飾を当てて parent に追加する。
-     記号は .md-mk のテキストノードとして残すので原文は完全に復元できる。 */
+     記号は .md-mk のテキストノードとして残すので原文は完全に復元できる。
+     数式（$...$）は先に取り出して強調・リンクの解析から守る（TeX の _ や * を
+     斜体や太字にしないため）。 */
   function appendInline(parent, text) {
+    if (!text) return;
+    const tok = tokenizeMath(text);
+    appendInlineTokens(parent, tok.text, tok.math);
+  }
+
+  function appendInlineTokens(parent, text, math) {
     if (!text) return;
     const re = new RegExp(MD_INLINE_SRC, 'g');
     let last = 0;
@@ -1017,7 +1188,9 @@
       } else if (m[8] !== undefined) {
         // ![alt](url) は文中の画像。行全体が画像の行は画像段落になる
         cls = m[7] ? 'md-img' : 'md-link';
-        open = m[7] + '['; close = '](' + m[9] + m[10] + ')'; body = m[8];
+        open = m[7] + '[';
+        close = '](' + untokenizeMath(m[9] + m[10], math) + ')';
+        body = m[8];
         emptyOk = true;  // ![](x.png) のように内側が空でも記法として扱う
         nested = !m[7];
       } else if (m[11]) {
@@ -1027,21 +1200,17 @@
       }
       // 内側が空・前後が空白のものは記法として扱わない（素のテキストとして残す）
       if ((!body && !emptyOk) || (body && /^\s|\s$/.test(body))) continue;
-      if (m.index > last) {
-        parent.appendChild(document.createTextNode(text.slice(last, m.index)));
-      }
+      appendPlain(parent, text.slice(last, m.index), math);
       const wrap = document.createElement('span');
       wrap.className = cls;
       wrap.appendChild(mdMark(open));
-      if (nested) appendInline(wrap, body);
-      else wrap.appendChild(document.createTextNode(body));
+      if (nested) appendInlineTokens(wrap, body, math);
+      else wrap.appendChild(document.createTextNode(untokenizeMath(body, math)));
       wrap.appendChild(mdMark(close));
       parent.appendChild(wrap);
       last = m.index + m[0].length;
     }
-    if (last < text.length) {
-      parent.appendChild(document.createTextNode(text.slice(last)));
-    }
+    appendPlain(parent, text.slice(last), math);
   }
 
   /* 表の1行をセル区切りの | で分割する。前後の空白と \| は素のテキストとして
@@ -1195,7 +1364,7 @@
     let n;
     while ((n = walker.nextNode())) {
       if (closestEl(n, '.pb') || closestEl(n, '.img-para') ||
-          closestEl(n, '.ai-del') || closestEl(n, '.mmd-widget')) continue;
+          closestEl(n, '.ai-del') || closestEl(n, WIDGET_SEL)) continue;
       const clean = n.data.replace(/\u200B/g, '');
       if (!clean) continue;
       chunks.push({ node: n, start: total, clean: clean });
@@ -1215,7 +1384,7 @@
     let n;
     while ((n = walker.nextNode())) {
       if (closestEl(n, '.pb') || closestEl(n, '.img-para') ||
-          closestEl(n, '.ai-del') || closestEl(n, '.mmd-widget') ||
+          closestEl(n, '.ai-del') || closestEl(n, WIDGET_SEL) ||
           inDel(n)) continue;
       const clean = n.data.replace(/\u200B/g, '');
       if (!clean) continue;
@@ -1566,6 +1735,9 @@
     editor.querySelectorAll('span.ai-del').forEach((el) => el.remove());
     editor.querySelectorAll('.ai-ins-obj').forEach((el) =>
       el.classList.remove('ai-ins-obj'));
+    editor.querySelectorAll('.md-math[data-ai], .mth-widget[data-ai]').forEach((el) => {
+      delete el.dataset.ai;
+    });
     if (window.CSS && CSS.highlights) CSS.highlights.delete('hle-ai-ins');
   }
 
@@ -1598,14 +1770,43 @@
     if (window.CSS && CSS.highlights && window.Highlight) {
       CSS.highlights.set('hle-ai-ins', new Highlight(...ranges));
     }
+    markAiMath(ranges);
   }
 
+  /* AI差分の青字は Highlight（DOM の外）なので、式の見え方を決めるために、AIが
+     足した範囲にかかる文中の数式へ印を付ける。式全体なら data-ai="ins"（式を青で
+     見せる）、一部なら "part"（TeX を見せて、どこが変わったかを青字で見せる） */
+  function markAiMath(ranges) {
+    // 範囲 r のうち、要素の並び els の中にかかる文字数（ZWSP と幽霊は数えない）
+    const coveredIn = (els, r) => els.reduce((sum, el) => {
+      const part = document.createRange();
+      part.selectNodeContents(el);
+      if (!r.intersectsNode(el)) return sum;
+      if (r.compareBoundaryPoints(Range.START_TO_START, part) > 0) {
+        part.setStart(r.startContainer, r.startOffset);
+      }
+      if (r.compareBoundaryPoints(Range.END_TO_END, part) < 0) {
+        part.setEnd(r.endContainer, r.endOffset);
+      }
+      return sum + part.toString().replace(/\u200B/g, '').length;
+    }, 0);
+    const mark = (target, els) => {
+      if (!ranges.some((r) => els.some((el) => r.intersectsNode(el)))) return;
+      const total = els.reduce((n, el) => n + paraResultText(el).length, 0);
+      const covered = ranges.reduce((n, r) => n + coveredIn(els, r), 0);
+      target.dataset.ai = covered >= total ? 'ins' : 'part';
+    };
+    editor.querySelectorAll('.md-math').forEach((span) => mark(span, [span]));
+    mathWidgets().forEach((w) => mark(w, blockParas.get(w) || []));
+    refreshMathViews();
+  }
   /* AI差分表示の on/off。prevText（前の稿の最終テキスト）を渡すと有効化、
      null で無効化。変更箇所の数を返す */
   function setAiDiff(prevText) {
     if (prevText == null) {
       aiDiffOps = null;
       clearAiOverlay();
+      refreshMathViews();
       scheduleCodeHighlight(); // 幽霊の挿入で割れたテキストノードに合わせ直す
       return 0;
     }
@@ -1799,14 +2000,18 @@
   function isMmdWidget(el) {
     return !!el && el.nodeType === 1 && el.classList.contains('mmd-widget');
   }
+  /* 図（mmd-widget）とブロックの数式（mth-widget）。どちらも本文ではない */
+  function isWidget(el) {
+    return !!el && el.nodeType === 1 && el.matches(WIDGET_SEL);
+  }
   function prevPara(p) {
     let e = p.previousElementSibling;
-    while (isMmdWidget(e)) e = e.previousElementSibling;
+    while (isWidget(e)) e = e.previousElementSibling;
     return e;
   }
   function nextPara(p) {
     let e = p.nextElementSibling;
-    while (isMmdWidget(e)) e = e.nextElementSibling;
+    while (isWidget(e)) e = e.nextElementSibling;
     return e;
   }
 
@@ -2102,13 +2307,820 @@
     codeTimer = setTimeout(syncCodeHighlight, CODE_DEBOUNCE);
   }
 
+  // ---------- 数式 ----------
+  // 数式は 2 通りに描く。どちらも、TeX のテキストは今までどおり本文に残り、校正
+  // （削除・追加・コメント）は TeX に対して行う。描画は隔離フレームの MathJax
+  // （math-view.js）で、受け取るのは SVG の文字列だけ。
+  //
+  // (1) ブロックの数式（$$ ... $$、```math）… Mermaid の図と同じく、閉じの段落の
+  //     直後に読み取り専用の div.mth-widget を挟む。本文ではないので cleanedClone
+  //     が保存から必ず落とす（<div> は feedback.py の逆変換で段落の区切りになる）。
+  //     ブロックの検出は class ではなく今の結果の行から行うので、人間が編集して
+  //     も追従し、保存済みのセッションにも効く。
+  // (2) 文中の数式（$...$）… 本文の中に描くので、TeX を隠して式を同じ位置に出す。
+  //     renderBase が作る span.md-math（$ と TeX はテキストのまま）に、描いた式を
+  //     疑似要素（::before）の mask で出す。DOM のノードは増えない（コメントの索引や
+  //     範囲の走査に現れない）。描けた式は TeX を意識させない 1 つの塊として扱う
+  //     （「文中の数式の見え方」の節）。span.md-math は renderBase が作り、数式に
+  //     対応する前に保存したセッションは、開いたときに upgradeSavedMath がそろえる。
+  //     人間が打った $...$ は描かない（TeX のまま）。
+  const MTH_DEBOUNCE = 400;
+  // ブロックの数式として探す行数の上限（閉じの $$ が無い書きかけで読み続けない）
+  const MTH_MAX_LINES = 200;
+  const MTH_MAX_INLINE = 1500;
+  let mthTimer = null;
+  // 文中の数式の span → 描いた（または描き方を頼んだ）TeX
+  const inlineMathKeys = new WeakMap();
+
+  /* $$ で始まる行から、ブロックの数式として閉じるところまでを返す。
+     {end, tex}（end は閉じの行の番号）。閉じが無ければ null。
+     $$ x $$ の 1 行、`$$` `式` `$$` の 3 行、`$$ 式` `式 $$` のどちらも対応する */
+  function parseMathBlock(texts, i) {
+    const t = texts[i];
+    const one = t.match(/^\s*\$\$(.+?)\$\$\s*$/);
+    if (one && one[1].indexOf('$$') < 0) {
+      return one[1].trim() ? { end: i, tex: one[1].trim() } : null;
+    }
+    const head = t.replace(/^\s*\$\$/, '');
+    if (head.indexOf('$$') >= 0) return null; // 「$$x$$ のあとに文が続く」行
+    const parts = [head];
+    for (let j = i + 1; j < texts.length && j <= i + MTH_MAX_LINES; j++) {
+      const c = texts[j].match(/^(.*)\$\$\s*$/);
+      if (c) {
+        parts.push(c[1]);
+        const tex = parts.join('\n').trim();
+        return tex ? { end: j, tex: tex } : null;
+      }
+      parts.push(texts[j]);
+    }
+    return null;
+  }
+
+  /* 行（文字列の配列）からブロックの数式を探す。
+     blocks: {start, end, tex}（start・end は行の番号。閉じの行が end）
+     roles : $$ ... $$ に含まれる行の番号 → 'delim'（$$ だけの行）| 'body'。
+             renderBase が、これらの行に強調やリンクを解釈させないために使う。
+     コードフェンスの中の $$ は数式ではない。```math のフェンスもブロックの数式 */
+  function scanMathBlocks(texts) {
+    const blocks = [];
+    const roles = {};
+    let fence = null;
+    for (let i = 0; i < texts.length; i++) {
+      const t = texts[i];
+      const fm = t.match(MMD_FENCE);
+      if (fence) {
+        if (fm && fm[1][0] === fence.ch && fm[1].length >= fence.len &&
+            !fm[2].trim()) {
+          const tex = fence.body.join('\n');
+          if (fence.math && tex.trim()) {
+            blocks.push({ start: fence.start, end: i, tex: tex });
+          }
+          fence = null;
+        } else if (fence.math) {
+          fence.body.push(t);
+        }
+        continue;
+      }
+      if (fm && !(fm[1][0] === '`' && fm[2].indexOf('`') >= 0)) {
+        fence = {
+          ch: fm[1][0], len: fm[1].length, start: i, body: [],
+          math: /^math(?:\s|$)/i.test(fm[2].trim()),
+        };
+        continue;
+      }
+      if (!/^\s*\$\$/.test(t)) continue;
+      const blk = parseMathBlock(texts, i);
+      if (!blk) continue;
+      blocks.push({ start: i, end: blk.end, tex: blk.tex });
+      for (let k = i; k <= blk.end; k++) {
+        roles[k] = texts[k].trim() === '$$' ? 'delim' : 'body';
+      }
+      i = blk.end;
+    }
+    return { blocks: blocks, roles: roles };
+  }
+
+  /* 描いた式の画像（SVG の data: URL）と大きさ（em）を、要素の CSS 変数に入れる。
+     CSSOM で入れるので、CSP の style-src 'self' に触れない */
+  function setMathVars(el, res) {
+    el.style.setProperty('--mth-img', 'url("' + res.url + '")');
+    el.style.setProperty('--mth-w', String(res.width));
+    el.style.setProperty('--mth-h', String(res.height));
+    el.style.setProperty('--mth-d', String(res.depth));
+  }
+  function clearMathVars(el) {
+    ['--mth-img', '--mth-w', '--mth-h', '--mth-d'].forEach((n) => {
+      el.style.removeProperty(n);
+    });
+  }
+
+  // ---------- ブロックの数式の見え方 ----------
+  // 描けたブロックの式は、TeX の段落（$$ の行と中の行）を隠して（.mth-hide。
+  // display: none）、式だけを見せる。文中の式と同じく、TeX を意識させない。
+  //   view="formula" … 式だけを見せる。クリックで式全体（TeX の段落すべて）を選び、
+  //                    コメント・削除・置き換えの対象にする。直後の段落の先頭の
+  //                    Backspace（直前の段落の末尾の Delete）は式全体を削除にする
+  //   view="deleted" … 式全体が削除済み。式を赤の取り消し線で見せる
+  //   view="ai-ins"  … AI差分の表示中で、AIが式を丸ごと足した。式を青で見せる
+  //   view="tex"     … TeX の段落を見せ、その下に式を添える。描けない式・描き終わる
+  //                    前の式、TeX の一部に人間の変更・AI差分がある式、ダブルクリック
+  //                    で TeX を編集している式（.mth-editing）
+  // ウィジェットごとの TeX の段落は blockParas に持つ（DOM には書かない）。
+  const blockParas = new WeakMap(); // ウィジェット → その式の TeX の段落の配列
+
+  function makeMathWidget() {
+    const w = document.createElement('div');
+    w.className = 'mth-widget';
+    w.contentEditable = 'false';
+    w.setAttribute('role', 'img');
+    w.setAttribute('aria-label', '数式');
+    // 取り消し線は式の幅だけに引く（mask を掛けた要素の上には描けないので外側の箱）
+    const box = document.createElement('span');
+    box.className = 'mth-box';
+    const img = document.createElement('span');
+    img.className = 'mth-img';
+    box.appendChild(img);
+    w.appendChild(box);
+    return w;
+  }
+
+  /* 描画結果をウィジェットに反映する。失敗したときは式の代わりにエラーの文言を
+     出す（CSS の疑似要素。TeX のテキストは本文にそのまま残っている） */
+  function showMathBlock(w, res, tex) {
+    if (res.ok) {
+      setMathVars(w, res);
+      w.dataset.state = 'ok';
+      w.removeAttribute('data-error');
+      w.setAttribute('aria-label', '数式: ' + tex.replace(/\s+/g, ' ').slice(0, 300));
+    } else {
+      clearMathVars(w);
+      w.dataset.state = 'error';
+      w.dataset.error = res.error;
+      w.setAttribute('aria-label', '数式を描画できません: ' + res.error);
+    }
+    refreshBlockView(w);
+  }
+
+  /* 式を描く。defer なら、キャッシュに無い式の描き直しは頼まない（打鍵のたびの
+     描き直しを避ける。止まってから syncMath がもう一度呼ぶ） */
+  function updateMathWidget(w, tex, defer) {
+    if (w.dataset.key === tex) return;
+    const hit = window.MathView.peek(tex, true);
+    if (!hit && defer) return;
+    w.dataset.key = tex;
+    if (hit) { showMathBlock(w, hit, tex); return; }
+    if (!w.dataset.state) w.dataset.state = 'loading';
+    window.MathView.render(tex, true).then((res) => {
+      if (w.dataset.key !== tex) return; // 古い依頼の結果は捨てる
+      showMathBlock(w, res, tex);
+      // 起動や時間切れのような一時的な失敗は、次の同期でもう一度頼む
+      if (res.transient) delete w.dataset.key;
+    });
+  }
+
+  /* 原文の行（削除した文字を含み、人間が足した文字・AI差分の幽霊を除く）と、
+     それぞれの行を構成する段落。人間が足した改行（ins.pb）は前の行とつながる。
+     式全体を削除したブロックを、削除したあとも見つけるために使う */
+  function baseLines() {
+    const lines = [];
+    let merge = false;
+    for (let el = editor.firstElementChild; el; el = el.nextElementSibling) {
+      if (el.tagName !== 'P') continue;
+      if (el.classList.contains('img-para')) {
+        lines.push({ text: '', para: el, paras: [el] });
+        merge = false;
+        continue;
+      }
+      let text = '';
+      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      let n;
+      while ((n = walker.nextNode())) {
+        if (closestEl(n, '.pb') || closestEl(n, '.ai-del') || inIns(n)) continue;
+        text += n.data;
+      }
+      text = text.replace(/\u200B/g, '').replace(/\u00a0/g, ' ').replace(/\n/g, '');
+      if (merge && lines.length) {
+        const last = lines[lines.length - 1];
+        last.text += text;
+        last.para = el;
+        last.paras.push(el);
+      } else {
+        lines.push({ text: text, para: el, paras: [el] });
+      }
+      merge = !!trailingMarker(el, 'ins');
+    }
+    return lines;
+  }
+
+  function blockParasOf(lines, b) {
+    const paras = [];
+    for (let i = b.start; i <= b.end; i++) {
+      lines[i].paras.forEach((p) => { if (paras.indexOf(p) < 0) paras.push(p); });
+    }
+    return paras;
+  }
+
+  function hasLiveText(p) {
+    return paraResultText(p) !== '';
+  }
+
+  const BLOCK_SHOWN = { formula: 1, deleted: 1, 'ai-ins': 1 };
+
+  function blockViewOf(w) {
+    const paras = blockParas.get(w) || [];
+    if (w.dataset.state !== 'ok' || w.classList.contains('mth-editing') || !paras.length) {
+      return 'tex';
+    }
+    if (w.dataset.base === 'deleted') {
+      // 式全体を削除した。足した文字があれば、どこに足したかを見せる
+      return paras.some((p) => p.querySelector('ins:not(.pb), .ai-del')) ? 'tex' : 'deleted';
+    }
+    if (paras.some((p) => p.querySelector('ins, del, .ai-del')) || w.dataset.ai === 'part') {
+      return 'tex';
+    }
+    return w.dataset.ai === 'ins' ? 'ai-ins' : 'formula';
+  }
+
+  /* ウィジェットの見え方を決め、TeX の段落を隠す／見せる。コメントの色も付け直す */
+  function refreshBlockView(w) {
+    // TeX を見せているあいだに（描けない式を直しているなど）キャレットが TeX の中に
+    // あれば、式が描けても隠さない。キャレットが外へ出たら隠す（updateMathSelection）
+    if (w.dataset.view === 'tex' && !w.classList.contains('mth-editing')) {
+      const sel = window.getSelection();
+      const node = sel && sel.rangeCount ? sel.getRangeAt(0).startContainer : null;
+      if (node && (blockParas.get(w) || []).some((p) => p.contains(node))) {
+        w.classList.add('mth-editing');
+      }
+    }
+    const view = blockViewOf(w);
+    if (w.dataset.view !== view) w.dataset.view = view;
+    const hide = !!BLOCK_SHOWN[view];
+    const paras = blockParas.get(w) || [];
+    paras.forEach((p) => p.classList.toggle('mth-hide', hide));
+    let cmt = '';
+    if (hide) {
+      if (paras.some((p) => p.querySelector('.cmt.active:not(.cmt-filtered)'))) cmt = 'active';
+      else if (paras.some((p) => p.querySelector('.cmt:not(.cmt-filtered)'))) cmt = 'on';
+    }
+    if (cmt) w.dataset.cmt = cmt; else w.removeAttribute('data-cmt');
+  }
+
+  function mathWidgets() {
+    return Array.prototype.filter.call(editor.children, (el) =>
+      el.classList.contains('mth-widget'));
+  }
+
+  function refreshBlockViews() {
+    mathWidgets().forEach(refreshBlockView);
+  }
+
+  /* 今の本文に合わせて、ブロックの数式の数・位置・中身を整える。すでに正しい位置に
+     あるウィジェットは動かさずに使い回す。defer なら、キャッシュに無い式の描き直しは
+     後回しにする（打鍵のたびに描き直さない） */
+  function syncMathBlocks(defer) {
+    const lines = resultLines();
+    const found = scanMathBlocks(lines.map((L) => L.text)).blocks.map((b) => {
+      const paras = blockParasOf(lines, b);
+      return { tex: b.tex, paras: paras, anchor: paras[paras.length - 1], deleted: false };
+    });
+    // 式全体を削除したブロックは「今の結果」には無いので、原文の行から探す
+    const used = new Set();
+    found.forEach((b) => b.paras.forEach((p) => used.add(p)));
+    const bl = baseLines();
+    scanMathBlocks(bl.map((L) => L.text)).blocks.forEach((b) => {
+      const paras = blockParasOf(bl, b);
+      if (paras.some((p) => used.has(p) || hasLiveText(p) ||
+                          p.classList.contains('img-para'))) return;
+      found.push({ tex: b.tex, paras: paras, anchor: paras[paras.length - 1], deleted: true });
+    });
+    const widgets = mathWidgets();
+    const taken = new Set();
+    const slots = found.map((b) => {
+      const next = b.anchor.nextElementSibling;
+      if (next && next.classList.contains('mth-widget') && !taken.has(next)) {
+        taken.add(next);
+        return next;
+      }
+      return null;
+    });
+    const spare = widgets.filter((w) => !taken.has(w));
+    const hidden = new Set();
+    found.forEach((b, i) => {
+      let w = slots[i];
+      if (!w) {
+        w = spare.shift() || makeMathWidget();
+        b.anchor.after(w);
+      }
+      blockParas.set(w, b.paras);
+      if (b.deleted) w.dataset.base = 'deleted'; else w.removeAttribute('data-base');
+      updateMathWidget(w, b.tex, defer);
+      refreshBlockView(w);
+      if (BLOCK_SHOWN[w.dataset.view]) b.paras.forEach((p) => hidden.add(p));
+    });
+    spare.forEach((w) => w.remove());
+    // 式でなくなった段落は見せる
+    editor.querySelectorAll('p.mth-hide').forEach((p) => {
+      if (!hidden.has(p)) p.classList.remove('mth-hide');
+    });
+  }
+
+  function widgetOfPara(p) {
+    return mathWidgets().find((w) => (blockParas.get(w) || []).indexOf(p) >= 0) || null;
+  }
+
+  /* 式全体（TeX の段落すべて）を選ぶ（クリックしたとき）。選んだ範囲は普通の選択
+     なので、コメント・削除・入力での置き換えがそのまま効く */
+  function selectMathBlock(w) {
+    const paras = blockParas.get(w) || [];
+    if (!paras.length) return;
+    editor.focus({ preventScroll: true });
+    const r = document.createRange();
+    r.setStart(paras[0], 0);
+    const last = paras[paras.length - 1];
+    r.setEnd(last, last.childNodes.length);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(r);
+    updateMathSelection();
+  }
+
+  /* ダブルクリックで TeX を編集する。キャレットを TeX の最初の文字の前（$$ だけの
+     行は飛ばす）に置く。キャレットが TeX の段落の外へ出ると、また式だけに戻る */
+  function editMathBlock(w) {
+    w.classList.add('mth-editing');
+    refreshBlockView(w);
+    const paras = blockParas.get(w) || [];
+    const target = paras.find((p) => !/^\s*\$\$\s*$|^\s*(`{3,}|~{3,})/.test(paraResultText(p))) ||
+      paras[0];
+    if (!target) return;
+    editor.focus({ preventScroll: true });
+    const walker = document.createTreeWalker(target, NodeFilter.SHOW_TEXT);
+    let n;
+    let off = 0;
+    while ((n = walker.nextNode())) {
+      if (closestEl(n, '.pb') || !n.data.replace(/\u200B/g, '')) continue;
+      // `$$ 式` の行は、$$ の後ろに置く
+      const m = n.data.match(/^\s*\$\$\s*/);
+      off = m && closestEl(n, '.md-mk') === null ? m[0].length : 0;
+      if (closestEl(n, '.md-mk')) continue;
+      break;
+    }
+    if (n) setCaret(n, Math.min(off, n.length)); else caretAtParaEdge(target, false);
+    updateMathSelection();
+  }
+
+  /* キャレットが隠した TeX の段落の中にあれば（undo のあとなど）、式の外へ出す。
+     式の後ろの段落の先頭、なければ前の段落の末尾へ。どちらも無ければ（文書が
+     式だけ）、TeX を見せて編集にする */
+  function caretOutOfHiddenBlock(r) {
+    const p = paraOf(r.startContainer);
+    if (!p || !p.classList.contains('mth-hide')) return false;
+    const visible = (e) => !!e && e.tagName === 'P' && !e.classList.contains('mth-hide') &&
+      !e.classList.contains('img-para');
+    let e = p.nextElementSibling;
+    while (e && !visible(e)) e = e.nextElementSibling;
+    if (e) { caretAtParaEdge(e, false); return true; }
+    e = p.previousElementSibling;
+    while (e && !visible(e)) e = e.previousElementSibling;
+    if (e) { caretAtParaEdge(e, true); return true; }
+    const w = widgetOfPara(p);
+    if (w) { w.classList.add('mth-editing'); refreshBlockView(w); }
+    return false;
+  }
+
+  /* 段落 p の直前（dir<0）・直後（dir>0）にある、式だけを見せているブロック */
+  function shownBlockNextTo(p, dir) {
+    let e = dir < 0 ? p.previousElementSibling : p.nextElementSibling;
+    if (dir > 0) {
+      // 直後は隠した TeX の段落が先に来る。その先のウィジェットを見る
+      while (e && e.tagName === 'P' && e.classList.contains('mth-hide')) e = e.nextElementSibling;
+    }
+    return e && e.classList.contains('mth-widget') && BLOCK_SHOWN[e.dataset.view] ? e : null;
+  }
+
+  /* 式全体を削除にする（TeX の文字と、段落のあいだの改行）。キャレットは元の段落の
+     端へ戻す。すでに削除済みなら何もしない（false） */
+  function deleteMathBlock(w, p, dir) {
+    if (w.dataset.view === 'deleted') return false;
+    const paras = blockParas.get(w) || [];
+    if (!paras.length) return false;
+    const r = document.createRange();
+    r.setStart(paras[0], 0);
+    const last = paras[paras.length - 1];
+    r.setEnd(last, last.childNodes.length);
+    trackedDeleteRange(r);
+    caretAtParaEdge(p, dir > 0);
+    return true;
+  }
+
+  // ---------- 文中の数式の見え方 ----------
+  // 描けた式は、TeX を意識させない 1 つの塊として扱う（画像と同じ）。
+  //   data-view="formula" … 式を見せる。contenteditable=false で、キャレットは中に
+  //                         入らず、矢印キーは式を 1 つとして飛び越える。クリックで
+  //                         式全体を選ぶ（コメント・削除・置き換えの対象になる）。
+  //                         Backspace / Delete は式全体を削除にする
+  //   data-view="deleted" … 式全体が削除済み。式を赤の取り消し線で見せる
+  //   data-view="ai-ins"  … AI差分の表示中で、AIが式全体を足した。式を青で見せる
+  //   data-view="tex"     … TeX を見せる。描けない式・描き終わる前の式、式の一部に
+  //                         人間の変更・AI差分がある式、ダブルクリックで TeX を
+  //                         編集している式（.md-math-edit）
+  // 見え方は保存しない（cleanedClone が落とす）。
+  const MATH_VIEWS = { formula: 1, deleted: 1, 'ai-ins': 1 };
+
+  /* 文中の数式の TeX。式の原文（人間が足した文字と AI差分の幽霊を除き、削除した
+     文字を含む）から作る。式全体を削除しても、同じ式を描いて取り消し線を引ける */
+  function inlineMathSource(span) {
+    let full = '';
+    const walker = document.createTreeWalker(span, NodeFilter.SHOW_TEXT);
+    let n;
+    while ((n = walker.nextNode())) {
+      if (inIns(n) || closestEl(n, '.ai-del') || closestEl(n, '.pb')) continue;
+      full += n.data;
+    }
+    full = full.replace(/[\u200B\n]/g, '');
+    if (full.length < 3 || full[0] !== '$' || full[full.length - 1] !== '$') {
+      return null;
+    }
+    const tex = full.slice(1, -1);
+    return tex.trim() ? tex : null;
+  }
+
+  /* 式の見え方を決める（上の data-view の一覧） */
+  function mathViewOf(span) {
+    if (span.dataset.mth !== 'ok' || span.classList.contains('md-math-edit')) return 'tex';
+    if (span.querySelector('ins, .ai-del') || span.dataset.ai === 'part') return 'tex';
+    let deleted = false;
+    let kept = false;
+    const walker = document.createTreeWalker(span, NodeFilter.SHOW_TEXT);
+    let n;
+    while ((n = walker.nextNode())) {
+      if (!n.data.replace(/\u200B/g, '')) continue;
+      if (inDel(n)) deleted = true; else kept = true;
+    }
+    if (deleted && kept) return 'tex';
+    if (deleted) return 'deleted';
+    return span.dataset.ai === 'ins' ? 'ai-ins' : 'formula';
+  }
+
+  function refreshMathView(span) {
+    const view = mathViewOf(span);
+    if (span.dataset.view !== view) span.dataset.view = view;
+    if (MATH_VIEWS[view]) {
+      if (span.contentEditable !== 'false') span.contentEditable = 'false';
+    } else if (span.hasAttribute('contenteditable')) {
+      span.removeAttribute('contenteditable');
+    }
+  }
+
+  function refreshMathViews() {
+    if (!editor) return;
+    editor.querySelectorAll('.md-math').forEach(refreshMathView);
+    refreshBlockViews();
+  }
+
+  /* node を含む、塊として見せている式（無ければ null） */
+  function shownMathOf(node) {
+    const span = closestEl(node, '.md-math');
+    return span && MATH_VIEWS[span.dataset.view] ? span : null;
+  }
+
+  function showInlineMath(span, res) {
+    if (res.ok) {
+      setMathVars(span, res);
+      span.dataset.mth = 'ok';
+      span.removeAttribute('title');
+    } else {
+      clearMathVars(span);
+      span.dataset.mth = 'err';
+      span.title = res.error;
+    }
+    refreshMathView(span);
+  }
+
+  function syncInlineMath() {
+    const spans = editor.querySelectorAll('.md-math');
+    const limit = Math.min(spans.length, MTH_MAX_INLINE);
+    for (let i = 0; i < limit; i++) {
+      const span = spans[i];
+      const tex = inlineMathSource(span);
+      if (tex === null) {
+        inlineMathKeys.delete(span);
+        delete span.dataset.mth;
+        clearMathVars(span);
+        refreshMathView(span);
+        continue;
+      }
+      if (inlineMathKeys.get(span) === tex && span.dataset.mth) {
+        refreshMathView(span);
+        continue;
+      }
+      inlineMathKeys.set(span, tex);
+      const hit = window.MathView.peek(tex, false);
+      if (hit) { showInlineMath(span, hit); continue; }
+      window.MathView.render(tex, false).then((res) => {
+        if (inlineMathKeys.get(span) !== tex) return;
+        if (res.transient) { // 一時的な失敗は、描けなかった式として覚えない
+          inlineMathKeys.delete(span);
+          return;
+        }
+        showInlineMath(span, res);
+      });
+    }
+  }
+
+  /* 今の本文に合わせて数式を描き直す */
+  function syncMath() {
+    clearTimeout(mthTimer);
+    mthTimer = null;
+    if (!editor || !window.MathView) return;
+    syncMathBlocks();
+    syncInlineMath();
+  }
+
+  /* 編集のたびに呼ばれる。見え方（削除の取り消し線など）はすぐに合わせ、描き直しは
+     連続する入力のあいだは待って、止まってから 1 回だけ */
+  function scheduleMath() {
+    if (!window.MathView) return;
+    // ブロックの式の検出と TeX を隠すかどうかは、打鍵のたびに合わせる（描き直しは待つ）
+    syncMathBlocks(true);
+    refreshMathViews();
+    clearTimeout(mthTimer);
+    mthTimer = setTimeout(syncMath, MTH_DEBOUNCE);
+  }
+
+  /* 式を 1 つの塊として選ぶ（クリックしたとき）。選んだ範囲は普通の選択なので、
+     コメント・削除・入力での置き換えがそのまま効く */
+  function selectMath(span) {
+    editor.focus({ preventScroll: true });
+    const r = document.createRange();
+    r.selectNode(span);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(r);
+    updateMathSelection();
+  }
+
+  /* ダブルクリックで TeX を編集する。キャレットを TeX の先頭に置く。キャレットが
+     式の外へ出ると、また塊に戻る（updateMathSelection） */
+  function editMath(span) {
+    span.classList.add('md-math-edit');
+    refreshMathView(span);
+    const walker = document.createTreeWalker(span, NodeFilter.SHOW_TEXT);
+    let n;
+    while ((n = walker.nextNode())) {
+      if (n.data.replace(/\u200B/g, '') && !closestEl(n, '.md-mk')) break;
+    }
+    editor.focus({ preventScroll: true });
+    if (n) setCaret(n, 0);
+    updateMathSelection();
+  }
+
+  function rangeCovers(r, el) {
+    const t = document.createRange();
+    t.selectNode(el);
+    return r.compareBoundaryPoints(Range.START_TO_START, t) <= 0 &&
+      r.compareBoundaryPoints(Range.END_TO_END, t) >= 0;
+  }
+
+  /* 選択が変わるたびに、選択に入っている式の目印（.md-math-sel。疑似要素で描いた式は
+     ブラウザの選択の色が付かないため）を付け直し、外へ出た編集中の式を塊に戻す */
+  function updateMathSelection() {
+    if (!editor) return;
+    const sel = window.getSelection();
+    let r = null;
+    if (sel && sel.rangeCount && editor.contains(sel.getRangeAt(0).commonAncestorContainer)) {
+      r = sel.getRangeAt(0);
+    }
+    // 塊の式（contenteditable=false）の中のキャレットでは、ブラウザが入力を捨てる
+    // （beforeinput も来ない）。undo の復元などで中に置かれたら、式の外へ出す
+    // （動かしたことで、もう一度この処理が呼ばれる）
+    if (r && r.collapsed && (caretOutOfMath(r) || caretOutOfHiddenBlock(r))) return;
+    // TeX を編集していたブロックは、選択が TeX の段落の外へ出たら式だけに戻す
+    editor.querySelectorAll('.mth-widget.mth-editing').forEach((w) => {
+      const paras = blockParas.get(w) || [];
+      const inside = (node) => paras.some((p) => p.contains(node));
+      if (r && inside(r.startContainer) && inside(r.endContainer)) return;
+      w.classList.remove('mth-editing');
+      refreshBlockView(w);
+    });
+    mathWidgets().forEach((w) => {
+      const paras = blockParas.get(w) || [];
+      const on = !!r && !r.collapsed && BLOCK_SHOWN[w.dataset.view] && paras.length > 0 &&
+        paras.every((p) => {
+          const t = document.createRange();
+          t.selectNodeContents(p);
+          return r.compareBoundaryPoints(Range.START_TO_START, t) <= 0 &&
+            r.compareBoundaryPoints(Range.END_TO_END, t) >= 0;
+        });
+      w.classList.toggle('mth-sel', on);
+    });
+    editor.querySelectorAll('.md-math-edit').forEach((el) => {
+      if (r && el.contains(r.startContainer) && el.contains(r.endContainer)) return;
+      el.classList.remove('md-math-edit');
+      refreshMathView(el);
+    });
+    editor.querySelectorAll('.md-math-sel').forEach((el) => {
+      if (!r || r.collapsed || !rangeCovers(r, el)) el.classList.remove('md-math-sel');
+    });
+    if (!r || r.collapsed) return;
+    editor.querySelectorAll('.md-math[data-view]').forEach((el) => {
+      if (MATH_VIEWS[el.dataset.view] && r.intersectsNode(el) && rangeCovers(r, el)) {
+        el.classList.add('md-math-sel');
+      }
+    });
+  }
+
+  /* キャレットが塊の式の中に入っていたら（undo のあとなど）、式の外へ出す。
+     式の先頭なら式の前、それ以外は式の後ろに置く */
+  function caretOutOfMath(r) {
+    const span = shownMathOf(r.startContainer);
+    if (!span) return false;
+    const pre = document.createRange();
+    pre.setStart(span, 0);
+    pre.setEnd(r.startContainer, r.startOffset);
+    if (pre.toString().replace(/\u200B/g, '')) setCaretAfter(span);
+    else setCaretBefore(span);
+    return true;
+  }
+
+  /* Backspace / Delete で隣の文字が塊の式の中だったとき、式全体を削除にする。
+     すでに削除済みの式は飛び越える */
+  function deleteMathAtCaret(span, dir) {
+    if (span.dataset.view === 'deleted') {
+      if (dir < 0) setCaretBefore(span); else setCaretAfter(span);
+      return false;
+    }
+    const walker = document.createTreeWalker(span, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    let n;
+    while ((n = walker.nextNode())) {
+      if (n.length && !inDel(n) && !closestEl(n, '.pb')) nodes.push(n);
+    }
+    nodes.forEach((t) => {
+      const del = document.createElement('del');
+      t.parentNode.replaceChild(del, t);
+      del.appendChild(t);
+    });
+    if (dir < 0) setCaretBefore(span); else setCaretAfter(span);
+    return true;
+  }
+
+  // ---------- 保存済みのセッションの数式 ----------
+  // 数式に対応する前に開いて編集を保存したセッションは、保存したときの HTML から
+  // 復元されるので、文中の式の span.md-math も、$$ の中の行の装飾の止めも無い
+  // （TeX の _ が斜体の記号として解釈されたまま）。開いたときに、本文の文字を
+  // 1 文字も変えずに、DOM の形だけを今の描き方にそろえる。
+  //  - 変更（ins / del）・改行のマーカー・コメントにかかる式と行は、そのままにする
+  //    （校正の内容を動かさない）
+  //  - 式の境目をまたぐ強調の装飾（.md-i / .md-b / .md-s。TeX の _ や * を強調と
+  //    読んだもの）は外す。装飾の span は逆変換では文字を持つだけなので、外しても
+  //    result_text は変わらない
+  const DECOR_SEL = '.md-i, .md-b, .md-s';
+
+  function paraTextMap(p) {
+    const nodes = [];
+    let text = '';
+    const walker = document.createTreeWalker(p, NodeFilter.SHOW_TEXT);
+    let n;
+    while ((n = walker.nextNode())) {
+      if (closestEl(n, '.pb')) continue;
+      nodes.push({ node: n, start: text.length });
+      text += n.data;
+    }
+    return { text: text, nodes: nodes };
+  }
+
+  /* 段落の文字位置 pos を {node, offset} にする。isEnd なら、境目は前のノードの末尾 */
+  function paraPoint(map, pos, isEnd) {
+    for (let i = 0; i < map.nodes.length; i++) {
+      const e = map.nodes[i];
+      const end = e.start + e.node.length;
+      if (isEnd ? (pos > e.start && pos <= end) : (pos >= e.start && pos < end)) {
+        return { node: e.node, offset: pos - e.start };
+      }
+    }
+    return null;
+  }
+
+  function unwrapEl(el) {
+    while (el.firstChild) el.parentNode.insertBefore(el.firstChild, el);
+    el.remove();
+  }
+
+  /* 段落 p の文字位置 [s, e)（$ を含む）を文中の数式にする。できたら true */
+  function wrapSavedMath(p, s, e) {
+    let map = paraTextMap(p);
+    // 範囲にかかる文字が、変更・既存の式・コードやリンクの中に無いこと。コメントは
+    // 式全体を囲んでいるものだけよい（式の一部にかかるコメントは、式にすると
+    // どこを指していたか見えなくなる）
+    const touched = map.nodes.filter((x) => x.start < e && x.start + x.node.length > s);
+    if (!touched.length || touched.some((x) =>
+      closestEl(x.node, 'ins, del, .md-math, .md-code-in, .md-link, .md-fn, .md-img'))) {
+      return false;
+    }
+    if (touched.some((x) => {
+      const c = closestEl(x.node, '.cmt');
+      return c && !touched.every((t) => c.contains(t.node));
+    })) return false;
+    // 式の境目をまたぐ強調の装飾を外す（記号の .md-mk も文字に戻す）
+    for (let guard = 0; guard < 20; guard++) {
+      const a = paraPoint(map, s, false);
+      const b = paraPoint(map, e, true);
+      if (!a || !b) return false;
+      const r = document.createRange();
+      r.setStart(a.node, a.offset);
+      r.setEnd(b.node, b.offset);
+      const crossing = Array.from(p.querySelectorAll(DECOR_SEL)).find((el) =>
+        r.intersectsNode(el) && !(el.contains(a.node) && el.contains(b.node)));
+      if (!crossing) break;
+      Array.from(crossing.children).forEach((c) => {
+        if (c.classList.contains('md-mk')) unwrapEl(c);
+      });
+      unwrapEl(crossing);
+      map = paraTextMap(p);
+    }
+    let a = paraPoint(map, s, false);
+    let b = paraPoint(map, e, true);
+    if (!a || !b) return false;
+    // 範囲の端でテキストノードを分けて、範囲がちょうどノードの境目になるようにする
+    let first = a.node;
+    if (a.offset > 0) first = first.splitText(a.offset);
+    map = paraTextMap(p);
+    b = paraPoint(map, e, true);
+    let last = b.node;
+    if (b.offset < last.length) last.splitText(b.offset);
+    if (first.parentNode !== last.parentNode) return false;
+    // 開きと閉じの $ を、それぞれ 1 文字のノードにする
+    const open = first;
+    let rest = open.length > 1 ? open.splitText(1) : null;
+    if (last === open) last = rest;
+    if (!last || !last.length) return false;
+    const close = last.length > 1 ? last.splitText(last.length - 1) : last;
+    if (close === open || close.data !== '$' || open.data !== '$') return false;
+    const wrap = document.createElement('span');
+    wrap.className = 'md-math';
+    open.parentNode.insertBefore(wrap, open);
+    const mkOpen = mdMark('');
+    mkOpen.appendChild(open);
+    wrap.appendChild(mkOpen);
+    const src = document.createElement('span');
+    src.className = 'md-mt';
+    while (wrap.nextSibling && wrap.nextSibling !== close) src.appendChild(wrap.nextSibling);
+    wrap.appendChild(src);
+    const mkClose = mdMark('');
+    mkClose.appendChild(close);
+    wrap.appendChild(mkClose);
+    return true;
+  }
+
+  function upgradeSavedMath() {
+    const paras = Array.prototype.filter.call(editor.children, (el) =>
+      el.tagName === 'P' && !el.classList.contains('img-para'));
+    // (1) $$ ... $$ の中の行を、コードと同じ装飾の無い行にする
+    const roles = scanMathBlocks(paras.map((p) => paraTextMap(p).text)).roles;
+    paras.forEach((p, i) => {
+      if (!roles[i] || p.querySelector('ins, del, .pb, .cmt')) return;
+      const text = paraTextMap(p).text.replace(/\u200B/g, '');
+      const want = roles[i] === 'delim' ? 'md-fence' : 'md-code';
+      if (p.className === want) return;
+      p.className = want;
+      p.textContent = '';
+      if (roles[i] === 'delim') p.appendChild(mdMark(text));
+      else p.appendChild(text ? document.createTextNode(text) : document.createElement('br'));
+    });
+    // (2) 文中の $...$ を文中の数式にする。コードの行と $$ の中の行は対象外
+    paras.forEach((p, i) => {
+      if (roles[i] || p.classList.contains('md-code') ||
+          p.classList.contains('md-fence')) return;
+      const text = paraTextMap(p).text;
+      if (text.indexOf('$') < 0) return;
+      findMathRanges(text).forEach((f) => { wrapSavedMath(p, f.start, f.end); });
+    });
+  }
+
   // ---------- 初期化 ----------
   function renderBase(text) {
     editor.textContent = '';
     const lines = String(text).replace(/\r\n?/g, '\n').split('\n');
     const tables = scanTables(lines);
+    const math = scanMathBlocks(lines).roles;
     const state = { fence: false };
     lines.forEach((line, i) => {
+      if (math[i]) {
+        // $$ ... $$ の中は TeX。強調・リンクなどを解釈せず、コードと同じ等幅で出す
+        // （$$ だけの行はフェンスと同じ扱い）。描いた式は syncMath が直後に挟む
+        const p = document.createElement('p');
+        if (math[i] === 'delim') {
+          p.className = 'md-fence';
+          p.appendChild(mdMark(line));
+        } else {
+          p.className = 'md-code';
+          p.appendChild(line ? document.createTextNode(line)
+                             : document.createElement('br'));
+        }
+        editor.appendChild(p);
+        return;
+      }
       const m = line.match(IMG_LINE);
       if (m && !state.fence) {
         editor.appendChild(makeImageParagraph(m[2], line, {}));
@@ -2144,6 +3156,9 @@
     if (opts && typeof opts.mediaKind === 'function') mediaKindFn = opts.mediaKind;
     if (savedHtml) {
       editor.innerHTML = savedHtml;
+      // 数式に対応する前に保存したセッションでも、式を描けるように DOM の形だけ
+      // そろえる（本文の文字は変えない）
+      upgradeSavedMath();
     } else {
       renderBase(baseText);
     }
@@ -2162,7 +3177,23 @@
       });
       syncMermaid();
     });
+    // 文中の数式: 選択に入った式の目印と、編集を終えた式を塊に戻す
+    document.addEventListener('selectionchange', updateMathSelection);
+    // ダブルクリックで、その式の TeX を編集する
+    editor.addEventListener('dblclick', (e) => {
+      const blk = e.target.closest && e.target.closest('.mth-widget');
+      if (blk && editor.contains(blk) && BLOCK_SHOWN[blk.dataset.view]) {
+        e.preventDefault();
+        editMathBlock(blk);
+        return;
+      }
+      const span = e.target.closest && e.target.closest('.md-math');
+      if (!span || !editor.contains(span) || !MATH_VIEWS[span.dataset.view]) return;
+      e.preventDefault();
+      editMath(span);
+    });
     syncMermaid();
+    syncMath();
     syncCodeHighlight();
   }
 
@@ -2182,6 +3213,13 @@
     followSpan: followSpan,
     baseText: baseText,
     rangeFromBase: rangeFromBase,
+    // コメントの選択・絞り込みを変えたあと、式の上のコメントの色を付け直す
+    refreshMath: function () { refreshMathViews(); },
+    // 要素が隠した TeX の段落の中なら、代わりに見えている式（ウィジェット）を返す
+    visibleTarget: function (el) {
+      const p = el && closestEl(el, 'p.mth-hide');
+      return (p && widgetOfPara(p)) || el;
+    },
     html: function () {
       if (!editor) return '';
       // 選択・強調・AI差分といった一時的な表示状態は保存しない

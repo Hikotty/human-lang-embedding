@@ -215,9 +215,124 @@ html, body {
   display: block; white-space: pre-wrap; overflow-wrap: anywhere;
   color: var(--red); font-size: .8rem; line-height: 1.6;
 }
-/* Mermaid を実行する隔離フレーム（mermaid-view.js が作る）。描画に必要な
+/* ---------- 数式 ----------
+   ブロックの数式（$$ ... $$、```math）は、閉じの段落の直後に出す読み取り専用の
+   表示（tracker.js）。本文ではなく、保存されない。テキストを持たないので、
+   読み込み中とエラーの文言は疑似要素で出す。式は MathJax が描いた SVG を mask に
+   して、文字色（currentColor）で塗る。ライト・ダークの切り替えで描き直さない */
+#editor { --mth-scale: 1.1; }
+#editor .mth-widget {
+  margin: .4em 0 1em; padding: 12px 16px; text-align: center; line-height: 0;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+  overflow-x: auto; user-select: none; -webkit-user-select: none;
+}
+/* 検出した直後で、まだ描く前（打鍵のたびの検出。描くのは止まってから） */
+#editor .mth-widget:not([data-state]) { display: none; }
+/* 式だけを見せるとき（TeX の段落は隠れている）。枠を付けず、本文の中の式として置く */
+#editor .mth-widget[data-view="formula"],
+#editor .mth-widget[data-view="deleted"],
+#editor .mth-widget[data-view="ai-ins"] {
+  margin: .5em 0 1em; padding: 6px 0; background: transparent;
+  border-color: transparent; cursor: default;
+}
+#editor p.mth-hide { display: none; }
+#editor .mth-widget .mth-box { display: inline-block; position: relative; }
+#editor .mth-widget .mth-img {
+  display: inline-block; vertical-align: top; font-size: 1.25em;
+  width: calc(var(--mth-w, 0) * 1em); height: calc(var(--mth-h, 0) * 1em);
+  background-color: currentColor;
+  -webkit-mask: var(--mth-img) center / 100% 100% no-repeat;
+  mask: var(--mth-img) center / 100% 100% no-repeat;
+}
+#editor .mth-widget:not([data-state="ok"]) .mth-box { display: none; }
+/* 式全体の削除（人間の変更）。del と同じ赤で、式の幅に取り消し線を重ねる */
+#editor .mth-widget[data-view="deleted"] { color: var(--red); }
+#editor .mth-widget[data-view="deleted"] .mth-box::after {
+  content: ""; position: absolute; left: -4px; right: -4px; top: 50%;
+  border-top: 1.5px solid var(--red); pointer-events: none;
+}
+/* AI差分の表示中に、AIが丸ごと足した式 */
+#editor .mth-widget[data-view="ai-ins"] { color: var(--blue); }
+/* 選んだ式（TeX の段落すべてが選択に入っている） */
+#editor .mth-widget.mth-sel {
+  background: color-mix(in srgb, var(--blue) 14%, transparent);
+  outline: 1px solid color-mix(in srgb, var(--blue) 55%, transparent);
+}
+/* 隠れた TeX にコメントが付いているとき（tracker.js が data-cmt を付ける） */
+#editor .mth-widget[data-cmt="on"] {
+  background: var(--cmt-bg); border-bottom: 2px solid #f9ab00;
+}
+#editor .mth-widget[data-cmt="active"] {
+  background: var(--cmt-active); border-bottom: 2px solid #f9ab00;
+}
+#editor .mth-widget[data-state="loading"]::after {
+  content: "数式を描画しています…";
+  color: var(--text-2); font-size: .85rem; line-height: 1.6;
+}
+#editor .mth-widget[data-state="error"] {
+  text-align: left; border-color: var(--red-border-soft); background: var(--red-tint);
+}
+#editor .mth-widget[data-state="error"]::after {
+  content: "数式を描画できません\A" attr(data-error);
+  display: block; white-space: pre-wrap; overflow-wrap: anywhere;
+  color: var(--red); font-size: .8rem; line-height: 1.6;
+}
+/* 文中の数式（span.md-math）。tracker.js が data-view で見え方を決める。
+   formula / deleted / ai-ins は、TeX（$ 記号を含む）を font-size: 0 で隠して（文字
+   そのものは本文に残る）、式を同じ位置に ::before の mask で出す。式は 1 つの塊
+   （contenteditable=false）で、クリックで選び、ダブルクリックで TeX を編集する。
+   tex は TeX をそのまま見せる（描けない式、一部に変更のある式、編集中の式） */
+#editor .md-math[data-view="formula"] > *,
+#editor .md-math[data-view="deleted"] > *,
+#editor .md-math[data-view="ai-ins"] > * {
+  font-size: 0;
+}
+#editor .md-math[data-view="formula"]::before,
+#editor .md-math[data-view="deleted"]::before,
+#editor .md-math[data-view="ai-ins"]::before {
+  content: ""; display: inline-block; cursor: default;
+  width: calc(var(--mth-w) * var(--mth-scale) * 1em);
+  height: calc(var(--mth-h) * var(--mth-scale) * 1em);
+  vertical-align: calc(var(--mth-d) * var(--mth-scale) * -1em);
+  background-color: currentColor;
+  -webkit-mask: var(--mth-img) center / 100% 100% no-repeat;
+  mask: var(--mth-img) center / 100% 100% no-repeat;
+}
+#editor .md-math[data-view] { border-radius: 2px; }
+/* 式全体の削除（人間の変更）。del と同じ赤で、取り消し線を重ねる */
+#editor .md-math[data-view="deleted"] { color: var(--red); position: relative; }
+#editor .md-math[data-view="deleted"]::after {
+  content: ""; position: absolute; left: 0; right: 0; top: 50%;
+  border-top: 1.5px solid var(--red); pointer-events: none;
+}
+/* AI差分の表示中に、AIが足した式（青字と同じ色） */
+#editor .md-math[data-view="ai-ins"] { color: var(--blue); }
+/* 選択に入っている式。疑似要素で描いた式にはブラウザの選択の色が付かない */
+#editor .md-math.md-math-sel {
+  background: color-mix(in srgb, var(--blue) 24%, transparent);
+  outline: 1px solid color-mix(in srgb, var(--blue) 55%, transparent);
+}
+/* 隠れている TeX にコメントが付いているとき、式の上にコメントの色を出す */
+#editor .md-math[data-view="formula"]:has(.cmt:not(.cmt-filtered)) {
+  background: var(--cmt-bg); border-bottom: 2px solid #f9ab00;
+}
+#editor .md-math[data-view="formula"]:has(.cmt.active) {
+  background: var(--cmt-active);
+}
+/* 見えているときの TeX は、コードと同じ等幅にする */
+#editor .md-mt {
+  font-family: "SFMono-Regular", Menlo, Consolas, "Courier New", monospace;
+  font-size: .88em;
+}
+/* 描けない式。TeX は残したまま、波線で示す（理由は title） */
+#editor .md-math[data-mth="err"] .md-mt {
+  text-decoration: underline wavy var(--red); text-underline-offset: 3px;
+}
+
+/* Mermaid を実行する隔離フレーム（mermaid-view.js が作る）と、数式を実行する
+   隔離フレーム（math-view.js が作る）。描画に必要な
    レイアウトはさせるが、見えず・触れず・フォーカスも受けない */
-.mmd-frame {
+.mmd-frame, .mth-frame {
   position: fixed; top: 0; left: 0; width: 720px; height: 900px; border: 0;
   opacity: 0; pointer-events: none; z-index: -1;
 }

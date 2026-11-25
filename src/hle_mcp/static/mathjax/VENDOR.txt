@@ -1,0 +1,39 @@
+static/mathjax/ の出所（このリポジトリに同梱している第三者ライブラリ）
+名前        : MathJax（TeX 入力 + SVG 出力のコンポーネント）
+版          : 4.1.3（npm の latest。2026-07-03 公開）
+取得元      : npm pack で取得した次の 2 つ（無加工で配置）
+  - mathjax@4.1.3
+      https://registry.npmjs.org/mathjax/-/mathjax-4.1.3.tgz
+      integrity sha512-BN/8Pkgn7G1pIDYJqd9md+JHsE/jydSYbyOZnSdSA0WziuVO8mRxdYiWFumkVVly/8U+hm9DpIIoWuvySverzw==
+      配置: tex-svg.js → tex-svg.js、input/tex/extensions/*.js → 同じパス、LICENSE → LICENSE.txt
+  - @mathjax/mathjax-newcm-font@4.1.3（既定の数式フォント。字形を SVG の path にする）
+      https://registry.npmjs.org/@mathjax/mathjax-newcm-font/-/mathjax-newcm-font-4.1.3.tgz
+      integrity sha512-gzAB3dFHilHX1l5x2xUqRL+1jDQt3Fyza1DkEMVXWC4E8SvsGdlgEza47HYi2WhVcgfkvf4zgUGzuhbq3Pjlew==
+      配置: svg/dynamic/*.js → fonts/mathjax-newcm-font/svg/dynamic/*.js
+SHA-256     : 全 82 ファイルの SHA-256 は SHA256SUMS に書いてある。本体の
+              tex-svg.js は
+              23c036deccc0f2374834a47e4032e452419f3ac027bf17e17c104e2746b19f4c
+ライセンス  : Apache-2.0（全文は LICENSE.txt。フォントのパッケージの package.json
+              の license も Apache-2.0）
+確認した脆弱性（GitHub の mathjax/MathJax の公開済み security advisory。
+2026-11-25 に API で確認）:
+  公開済みのものは 0 件。4.1.3 に未公開・未発見の問題がないことを意味しない。
+  だからこそ、版に頼らず隔離を主な防御にしている（下記）。
+追加読み込みの置き場:
+  tex-svg.js は、\boldsymbol・\cancel・\color・\mhchem などの拡張を
+  input/tex/extensions/ から、数式フォントの追加の字形（\mathbb・\mathcal・
+  \mathfrak・矢印・記号・ギリシャ文字の全域など）を
+  fonts/mathjax-newcm-font/svg/dynamic/ から、使うときに読む。MathJax の既定の
+  取得元は CDN で、フレームの CSP が通信を許さないため、math-config.js の
+  svg.fontPath で /static/mathjax/fonts/ を指している。webserver.py は
+  /static/mathjax/ 以下の .js だけを配る。
+このリポジトリでの使い方:
+  エディタのページでは動かさない。math-frame.html（sandbox="allow-scripts"、
+  allow-same-origin なしの不透明オリジン、専用 CSP）の中だけで動かし、結果の
+  SVG を CSS の mask-image（data: URL）で見せる。設定は math-config.js
+  （音声化・点字・Explorer・メニュー・未定義マクロの無視を切っている）。
+  版を上げるときは、npm pack で 2 つを取り直して上の配置をやり直し、
+  SHA256SUMS（このディレクトリで
+  `find . -type f -name '*.js' | LC_ALL=C sort | sed 's|^\./||' | xargs shasum -a 256`）、
+  版、integrity、advisory の確認を更新する。tests/test_math_serving.py が、
+  同梱ファイルの SHA-256 が SHA256SUMS と一致することを確かめる。

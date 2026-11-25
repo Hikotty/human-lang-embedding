@@ -581,6 +581,8 @@
       const anyVisible = cids.some((cid) => !hidden.has(cid));
       p.classList.toggle('cmt-filtered', cids.length > 0 && !anyVisible);
     });
+    // TeX を隠したブロックの式は、式の上にコメントの色を出している
+    if (Tracker.refreshMath) Tracker.refreshMath();
   }
 
   /* ---------- AIコメントの本文への結び付け ----------
@@ -921,6 +923,7 @@
         (p.dataset.cids || '').split(/\s+/).indexOf(cid) >= 0));
     document.querySelectorAll('.comment-card').forEach((card) =>
       card.classList.toggle('active', card.dataset.cid === cid));
+    if (Tracker.refreshMath) Tracker.refreshMath();
     clearJumpHighlight();
     if (scrollEditor) {
       jumpToComment(cid);
@@ -942,7 +945,8 @@
       document.querySelector('#editor .cmt[data-cid="' + cid + '"]') ||
       document.querySelector('#editor .img-para[data-cids~="' + cid + '"]');
     if (anchored) {
-      anchored.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      // 隠した TeX に付いたコメントは、見えている式へ飛ぶ
+      Tracker.visibleTarget(anchored).scrollIntoView({ behavior: 'smooth', block: 'center' });
       return;
     }
     const c = session.comments.find((x) => x.id === cid);
@@ -991,7 +995,7 @@
   function showJump(range) {
     const sc = range.startContainer;
     const el = sc.nodeType === Node.ELEMENT_NODE ? sc : sc.parentElement;
-    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    Tracker.visibleTarget(el).scrollIntoView({ behavior: 'smooth', block: 'center' });
     if (window.CSS && CSS.highlights && window.Highlight) {
       CSS.highlights.set('hle-jump', new Highlight(range));
     }

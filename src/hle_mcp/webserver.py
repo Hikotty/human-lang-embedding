@@ -108,8 +108,41 @@ _CSP_MERMAID_FRAME = (
 )
 # 隔離フレームとして配信する静的ファイル名（X-Frame-Options も SAMEORIGIN にする）
 _MERMAID_FRAME_PAGE = "mermaid-frame.html"
+# 数式（MathJax）を実行する隔離フレーム自身のCSP。Mermaid のフレームと同じ作りで、
+# エディタが sandbox="allow-scripts"（allow-same-origin なし = 不透明オリジン）で
+# 埋め込む。MathJax は SVG の要素に style 属性を入れるので style-src 'unsafe-inline'
+# が要る（このフレームの中だけ）。スクリプトは同一ホストの静的ファイルだけで、
+# 'unsafe-eval' も 'unsafe-inline'（script）も許さない。通信は一切できない。
+# 拡張とフォントの追加読み込み（/static/mathjax/ 以下）も同一ホストのスクリプト。
+_CSP_MATH_FRAME = (
+    "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; "
+    "img-src data:; font-src data:; "
+    "form-action 'none'; base-uri 'none'; frame-ancestors 'self'"
+)
+_MATH_FRAME_PAGE = "math-frame.html"
+# 同梱した MathJax の置き場（static/mathjax/）。本体・拡張・フォントの追加分が
+# 入れ子のディレクトリにあるので、ここだけ入れ子の配信を許す。配るのは .js だけ
+_MATHJAX_DIR = "mathjax"
+_MATHJAX_SUFFIXES = (".js",)
+_MATHJAX_PART = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # HTML以外（JSON・画像・静的アセット）はすべて禁止で足りる。
 _CSP_STRICT = "default-src 'none'; frame-ancestors 'none'"
+
+
+def _mathjax_path(rel: list[str]) -> Path:
+    """/static/mathjax/ 以下のURLの要素を、同梱ディレクトリの中の .js ファイルに
+    解決する。要素は英数字で始まる普通の名前だけ（.. や . で始まる名前・区切り
+    文字・%エンコードで化けたものは通さない）で、解決後も同梱ディレクトリの
+    中にあることを確かめる。"""
+    root = (_STATIC_DIR / _MATHJAX_DIR).resolve()
+    names = [unquote(p) for p in rel]
+    if not all(_MATHJAX_PART.match(n) for n in names) \
+            or not names[-1].endswith(_MATHJAX_SUFFIXES):
+        raise KeyError("ファイルが見つかりません")
+    path = root.joinpath(*names).resolve()
+    if root not in path.parents:
+        raise KeyError("ファイルが見つかりません")
+    return path
 
 
 def build_version() -> str:
@@ -541,8 +574,15 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_file(
                     _STATIC_DIR / name, csp=_CSP_MERMAID_FRAME, frameable=True
                 )
+            elif name == _MATH_FRAME_PAGE:
+                # 数式の隔離フレーム。Mermaid と同じく専用のCSPで自オリジンのみ
+                self._send_file(
+                    _STATIC_DIR / name, csp=_CSP_MATH_FRAME, frameable=True
+                )
             else:
                 self._send_file(_STATIC_DIR / name)
+        elif len(parts) >= 3 and parts[:2] == ["static", _MATHJAX_DIR]:
+            self._send_file(_mathjax_path(parts[2:]))
         elif parsed.path == "/api/health":
             self._send_json(health_payload())
         elif parsed.path == "/api/media":
@@ -1025,6 +1065,9 @@ def self_test() -> None:
                  "/static/tracker.js", "/static/mermaid-view.js",
                  "/static/mermaid-frame.html", "/static/mermaid-frame.js",
                  "/static/mermaid.min.js",
+                 "/static/math-view.js", "/static/math-frame.html",
+                 "/static/math-config.js", "/static/math-frame.js",
+                 "/static/mathjax/tex-svg.js",
                  "/static/hljs.min.js", "/static/hljs-dockerfile.min.js",
                  "/static/hljs-hcl.js", "/static/code-highlight.js",
                  "/api/sessions?limit=1"]
