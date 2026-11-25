@@ -1024,7 +1024,10 @@ def self_test() -> None:
                  "/static/theme.js", "/static/app.js",
                  "/static/tracker.js", "/static/mermaid-view.js",
                  "/static/mermaid-frame.html", "/static/mermaid-frame.js",
-                 "/static/mermaid.min.js", "/api/sessions?limit=1"]
+                 "/static/mermaid.min.js",
+                 "/static/hljs.min.js", "/static/hljs-dockerfile.min.js",
+                 "/static/hljs-hcl.js", "/static/code-highlight.js",
+                 "/api/sessions?limit=1"]
         with _LOCAL.open(base + paths[-1], timeout=10) as res:
             sessions = json.loads(res.read().decode("utf-8"))["sessions"]
         for s in sessions:

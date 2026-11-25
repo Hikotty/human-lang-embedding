@@ -1,0 +1,40 @@
+hljs.min.js / hljs-dockerfile.min.js の出所（このリポジトリに同梱している第三者ライブラリ）
+
+名前        : highlight.js（コードブロックの構文ハイライトに使う）
+版          : 11.12.0（npm の latest。確認した 2026-11-10 時点）
+取得元      : https://registry.npmjs.org/@highlightjs/cdn-assets/-/cdn-assets-11.12.0.tgz
+              （ブラウザ向けのビルド済み配布物。無加工で配置）
+              hljs.min.js            ← package/highlight.min.js
+                                       （共通の言語セット: bash c cpp csharp css diff go
+                                        graphql ini java javascript json kotlin less lua
+                                        makefile markdown objectivec perl php python r ruby
+                                        rust scss shell sql swift typescript vbnet wasm xml
+                                        yaml など。ini の別名で toml、xml の別名で html も使える）
+              hljs-dockerfile.min.js ← package/languages/dockerfile.min.js
+                                       （共通セットに無い Dockerfile を足す）
+SHA-256     :
+  hljs.min.js            8ab71eb09c51f501e5e25157d9cff100e46cc29bcbfc744d0b746d451fca7f53
+  hljs-dockerfile.min.js d96f73b077d654d776795097cf49afae5dce3ce453106af022eae013ad2ec8b1
+ライセンス  : BSD-3-Clause（全文は hljs.LICENSE.txt）
+
+確認した脆弱性（GitHub Advisory Database の npm・highlight.js。2026-11-10 に確認）:
+  公開されているのは次の2件だけで、どちらも 2020 年に 10.4.1 で修正済み。11.12.0 は
+  それより後の版。
+  - GHSA-7wwv-vh3v-89cq … 複数の文法の ReDoS（細工した入力でブラウザが固まる）
+  - CVE-2020-26237 / GHSA-vfrc-7r7c-w9mx … 言語名の指定によるプロトタイプ汚染
+
+公開済みの advisory が無いことは、11.12.0 に未発見の問題が無いことを意味しない。
+とくに ReDoS は文法の正規表現の性質なので、次のようにして被害を抑えている。
+
+このリポジトリでの使い方:
+  - 言語名は code-highlight.js が [a-z0-9_+#.-]{1,32} に絞り、hljs.getLanguage で
+    登録済みの文法に当たったものだけを渡す（プロトタイプ汚染の経路を作らない）。
+  - hljs.highlight の戻り値（HTML 文字列）は DOM に入れない。code-highlight.js が
+    <span class="hljs-…"> と本文だけを読み取って、文字位置とトークンの種類の表に
+    変換する。色は CSS Custom Highlight API で重ねるだけで、本文の DOM は変えない。
+  - 1ブロックが 60,000 文字を超えるものには色を付けない（解析にかける量の上限）。
+  - 版を上げるときは、この表示（版・SHA-256・advisory の確認）も更新する。
+
+hljs-hcl.js（HCL / Terraform の文法）は highlight.js に同梱されていないため、
+このリポジトリで書いた自前のコード（第三者ライブラリではない）。
+

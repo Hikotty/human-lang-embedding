@@ -276,6 +276,8 @@
     // 図はスナップショットに入らず、差し替えで消えている。待たずに作り直す
     // （結果はキャッシュにあるので、空の枠を見せずに済む）
     syncMermaid();
+    // 差し替えで Range が潰れているので、コードの色も待たずに付け直す
+    syncCodeHighlight();
   }
   function snapshot() {
     undoStack.push(captureState());
@@ -297,6 +299,7 @@
     // AI差分表示中は、編集でずれた幽霊・青字の割り付けをやり直す
     if (aiDiffOps) applyAiOverlay();
     scheduleMermaid();
+    scheduleCodeHighlight();
     if (onChangeCb) onChangeCb();
   }
 
@@ -1603,6 +1606,7 @@
     if (prevText == null) {
       aiDiffOps = null;
       clearAiOverlay();
+      scheduleCodeHighlight(); // 幽霊の挿入で割れたテキストノードに合わせ直す
       return 0;
     }
     const idx = baseIndex();
@@ -1610,6 +1614,7 @@
     aiDiffOps = computeAiDiff(
       String(prevText).replace(/\r\n?/g, '\n'), baseText);
     applyAiOverlay();
+    scheduleCodeHighlight();
     return aiDiffOps.dels.length + aiDiffOps.inss.length;
   }
 
@@ -1835,19 +1840,23 @@
         mergeNext = !!trailingMarker(el, 'del');
       }
       if (lines.length && mergePrev) {
-        lines[lines.length - 1].text += text;
-        lines[lines.length - 1].para = el;
+        const last = lines[lines.length - 1];
+        last.text += text;
+        last.para = el;
+        last.paras.push(el);
       } else {
-        lines.push({ text: text, para: el });
+        lines.push({ text: text, para: el, paras: [el] });
       }
       mergePrev = mergeNext;
     }
     return lines;
   }
 
-  /* ```mermaid ... ``` のブロックを {source, anchor} の配列で返す。
-     anchor は閉じフェンスの行の最後の段落（図はその直後に置く） */
-  function findMermaidBlocks(lines) {
+  /* コードフェンスで囲まれたブロックを {lang, info, body, anchor} の配列で返す。
+     info は開きフェンスの言語指定（```python:app.py の "python:app.py"）、
+     lang はその先頭の語（小文字）、body は中の行（resultLines の要素）、
+     anchor は閉じフェンスの行の最後の段落。閉じていないブロックは含めない */
+  function findFencedBlocks(lines) {
     const blocks = [];
     let open = null;
     lines.forEach((L) => {
@@ -1855,19 +1864,32 @@
       if (!open) {
         // 開きフェンス。バッククォートのフェンスは info に ` を含められない
         if (!m || (m[1][0] === '`' && m[2].indexOf('`') >= 0)) return;
-        const lang = (m[2].trim().split(/\s+/)[0] || '').toLowerCase();
-        open = { ch: m[1][0], len: m[1].length, mermaid: lang === 'mermaid', src: [] };
+        open = { ch: m[1][0], len: m[1].length, info: m[2].trim(), body: [] };
         return;
       }
       if (m && m[1][0] === open.ch && m[1].length >= open.len && !m[2].trim()) {
-        const source = open.src.join('\n');
-        if (open.mermaid && source.trim()) {
-          blocks.push({ source: source, anchor: L.para });
-        }
+        blocks.push({
+          lang: (open.info.split(/\s+/)[0] || '').toLowerCase(),
+          info: open.info,
+          body: open.body,
+          anchor: L.para,
+        });
         open = null;
         return;
       }
-      if (open.mermaid) open.src.push(L.text);
+      open.body.push(L);
+    });
+    return blocks;
+  }
+
+  /* ```mermaid ... ``` のブロックを {source, anchor} の配列で返す。
+     anchor は閉じフェンスの行の最後の段落（図はその直後に置く） */
+  function findMermaidBlocks(lines) {
+    const blocks = [];
+    findFencedBlocks(lines).forEach((b) => {
+      if (b.lang !== 'mermaid') return;
+      const source = b.body.map((L) => L.text).join('\n');
+      if (source.trim()) blocks.push({ source: source, anchor: b.anchor });
     });
     return blocks;
   }
@@ -1954,6 +1976,132 @@
     mmdTimer = setTimeout(syncMermaid, MMD_DEBOUNCE);
   }
 
+  // ---------- コードブロックの構文ハイライト ----------
+  // 言語つきのコードフェンス（```python など）の中の文字に色を付ける。色は
+  // CSS Custom Highlight API の Range で重ねるだけで、本文の DOM は変えない
+  // （<span> を足すと feedback.py の逆変換とコメントの索引に影響するため）。
+  // 保存されるHTML・result_text・コメントの引用文は変わらず、保存済みの
+  // セッション（edited_html の復元）にもそのまま効く。
+  //
+  // トークンの計算は code-highlight.js（highlight.js）。ブロックの検出は
+  // Mermaid と同じく class ではなく「今の結果」の行から行うので、人間が編集
+  // しても色が本文に追従する。色を付けない文字は次のとおり。
+  //  - 人間が追加した文字（<ins>）… 変更の目印の赤字を色で潰さない
+  //  - 削除した文字（<del>）・改行マーカー・AI差分の幽霊 … 結果の文字ではない
+  // AI差分の青字（hle-ai-ins）は優先度で色分けより勝つ。閉じていないフェンス、
+  // 言語指定が無い／知らない言語のブロックには色を付けない。
+  const CODE_DEBOUNCE = 250;
+  // 1回の反映で解析にかける文字数の合計の上限
+  const CODE_MAX_TOTAL = 300000;
+  const CODE_HL_PREFIX = 'hle-tok-';
+  let codeTimer = null;
+  const codeApplied = new Set(); // 今登録している種類
+
+  function codeHighlightSupported() {
+    return !!(window.CodeHighlight && window.CSS && CSS.highlights && window.Highlight);
+  }
+
+  /* 結果の1行（resultLines の要素）を構成する文字の連なり。paraResultText が
+     取り除く文字（削除・改行マーカー・AI差分の幽霊・ZWSP・\n）を除いた
+     連なりごとに、行の中の文字位置 start（L.text の添字と一致する）を持つ。
+     colored=false は色を付けない連なり（人間の追加）。数えた文字数が L.text と
+     合わないときは null（位置を信用できない） */
+  function lineRuns(L) {
+    const runs = [];
+    let off = 0;
+    L.paras.forEach((p) => {
+      if (p.classList.contains('img-para')) return;
+      const walker = document.createTreeWalker(p, NodeFilter.SHOW_TEXT);
+      let n;
+      while ((n = walker.nextNode())) {
+        if (closestEl(n, '.pb') || closestEl(n, '.ai-del') || inDel(n)) continue;
+        const d = n.data;
+        const colored = !inIns(n);
+        let from = -1;
+        for (let i = 0; i <= d.length; i++) {
+          const code = i < d.length ? d.charCodeAt(i) : -1;
+          if (code >= 0 && code !== 0x200B && code !== 10) {
+            if (from < 0) from = i;
+            continue;
+          }
+          if (from >= 0) {
+            runs.push({ node: n, from: from, len: i - from, start: off, colored: colored });
+            off += i - from;
+            from = -1;
+          }
+        }
+      }
+    });
+    return off === L.text.length ? runs : null;
+  }
+
+  /* ブロックの本文（body の行をつないだコード）のトークンを、本文のテキスト
+     ノード上の Range にして種類ごとの配列 out に足す */
+  function addCodeRanges(body, toks, out) {
+    const runsOf = body.map(lineRuns);
+    if (runsOf.some((r) => r === null)) return;
+    const starts = [];
+    let pos = 0;
+    body.forEach((L) => {
+      starts.push(pos);
+      pos += L.text.length + 1; // 行をつなぐ \n の分
+    });
+    let li = 0;
+    toks.forEach((tok) => {
+      const s = tok[0];
+      const e = tok[1];
+      while (li + 1 < body.length && starts[li + 1] <= s) li++;
+      for (let k = li; k < body.length && starts[k] < e; k++) {
+        const a = Math.max(s, starts[k]) - starts[k];
+        const b = Math.min(e, starts[k] + body[k].text.length) - starts[k];
+        if (b <= a) continue;
+        runsOf[k].forEach((r) => {
+          if (!r.colored || r.start >= b || r.start + r.len <= a) return;
+          const range = document.createRange();
+          range.setStart(r.node, r.from + Math.max(a, r.start) - r.start);
+          range.setEnd(r.node, r.from + Math.min(b, r.start + r.len) - r.start);
+          (out[tok[2]] || (out[tok[2]] = [])).push(range);
+        });
+      }
+    });
+  }
+
+  /* 今の本文に合わせてコードの色を付け直す */
+  function syncCodeHighlight() {
+    clearTimeout(codeTimer);
+    codeTimer = null;
+    if (!editor || !codeHighlightSupported()) return;
+    const out = Object.create(null);
+    let total = 0;
+    findFencedBlocks(resultLines()).forEach((b) => {
+      const lang = window.CodeHighlight.language(b.info);
+      if (!lang || !b.body.length) return;
+      const code = b.body.map((L) => L.text).join('\n');
+      total += code.length;
+      if (total > CODE_MAX_TOTAL) return;
+      const toks = window.CodeHighlight.tokens(lang, code);
+      if (toks) addCodeRanges(b.body, toks, out);
+    });
+    codeApplied.forEach((cat) => {
+      if (!out[cat]) CSS.highlights.delete(CODE_HL_PREFIX + cat);
+    });
+    codeApplied.clear();
+    Object.keys(out).forEach((cat) => {
+      const hl = new Highlight();
+      hl.priority = -1; // AI差分の青字（優先度 0）より下に置く
+      out[cat].forEach((r) => hl.add(r));
+      CSS.highlights.set(CODE_HL_PREFIX + cat, hl);
+      codeApplied.add(cat);
+    });
+  }
+
+  /* 編集のたびに呼ばれる。連続する入力のあいだは付け直さず、止まってから1回だけ */
+  function scheduleCodeHighlight() {
+    if (!codeHighlightSupported()) return;
+    clearTimeout(codeTimer);
+    codeTimer = setTimeout(syncCodeHighlight, CODE_DEBOUNCE);
+  }
+
   // ---------- 初期化 ----------
   function renderBase(text) {
     editor.textContent = '';
@@ -2015,6 +2163,7 @@
       syncMermaid();
     });
     syncMermaid();
+    syncCodeHighlight();
   }
 
   window.Tracker = {

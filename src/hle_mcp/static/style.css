@@ -49,6 +49,17 @@
   --purple-border: light-dark(#c58af9, #8a5cb8);
   --toast-bg: light-dark(#3c4043, #e3e3e3);
   --toast-text: light-dark(#fff, #202124);
+  /* コードブロックの構文ハイライト。--code-bg と、コメントのハイライト
+     (--cmt-bg) の上でも読める濃さ。赤は人間の変更の色なので使わない
+     （diff の削除行もオレンジにしてある） */
+  --tok-keyword: light-dark(#7c3aed, #c4b5fd);
+  --tok-builtin: light-dark(#0f766e, #5eead4);
+  --tok-title: light-dark(#1d4ed8, #93c5fd);
+  --tok-attr: light-dark(#92400e, #fbbf24);
+  --tok-number: light-dark(#a34a00, #fdba74);
+  --tok-string: light-dark(#11692f, #86efac);
+  --tok-meta: light-dark(#475569, #a3b1c4);
+  --tok-comment: light-dark(#57606a, #a3abb4);
 }
 :root[data-theme="dark"] { color-scheme: dark; }
 
@@ -163,6 +174,21 @@ html, body {
 }
 /* フェンス行に上下の余白を持たせ、ブロック全体が箱に見えるようにする */
 #editor .md-fence { color: var(--text-3); padding: .3em .7em; }
+
+/* コードブロックの構文ハイライト（tracker.js が Custom Highlight API で重ねる）。
+   DOMを変えないので保存されるHTMLに残らない。使えるのは色などの一部の
+   プロパティだけなので、太字・斜体は使わず色だけで分ける。人間が追加した文字
+   (ins) は色を付けず赤字のまま。優先度は AI差分の青字(hle-ai-ins)より下 */
+::highlight(hle-tok-keyword) { color: var(--tok-keyword); }
+::highlight(hle-tok-builtin) { color: var(--tok-builtin); }
+::highlight(hle-tok-title) { color: var(--tok-title); }
+::highlight(hle-tok-attr) { color: var(--tok-attr); }
+::highlight(hle-tok-number) { color: var(--tok-number); }
+::highlight(hle-tok-string) { color: var(--tok-string); }
+::highlight(hle-tok-meta) { color: var(--tok-meta); }
+::highlight(hle-tok-comment) { color: var(--tok-comment); }
+::highlight(hle-tok-add) { color: var(--tok-string); }
+::highlight(hle-tok-del) { color: var(--tok-number); }
 
 /* ---------- Mermaid の図 ----------
    ```mermaid のブロックの直後に出す読み取り専用の表示（tracker.js）。
