@@ -337,7 +337,7 @@ def test_complete_button_sets_reviewed(review):
     page, sid = review
     page.click("#btn-complete")
     expect(page.locator("#doc-meta")).to_contain_text("校正完了")
-    expect(page.locator("#btn-complete")).to_contain_text("校正完了済み")
+    expect(page.locator("#btn-complete")).to_have_attribute("aria-label", "校正完了済み")
     assert storage.load_session(sid)["status"] == "reviewed"
 
 

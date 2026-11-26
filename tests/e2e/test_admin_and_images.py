@@ -195,7 +195,8 @@ def test_image_itself_can_be_commented(image_review):
     para.click()
     page.click("#btn-comment")
     # 下書きの対象表示が画像であることが分かる
-    expect(page.locator("#draft-quote")).to_have_text("🖼 zu1.png")
+    expect(page.locator("#draft-quote")).to_have_text("zu1.png")
+    expect(page.locator("#draft-quote svg.ico")).to_have_count(1)
     page.fill("#draft-text", "この図は配色を直してほしい")
     page.click("#draft-submit")
     expect(page.locator(".comment-card")).to_have_count(1)

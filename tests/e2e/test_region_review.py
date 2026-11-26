@@ -184,7 +184,8 @@ def test_region_comment_saves_screenshot_and_position(open_review):
     l1 = frame_rect(page, "#l1")
     x, y, w, h = l1["x"] - 12, l1["y"] - 12, l1["w"] + 24, l1["h"] + 24
     draw(page, x, y, w, h)
-    expect(page.locator("#draft-quote")).to_contain_text("▭ 左上の箱")
+    expect(page.locator("#draft-quote")).to_contain_text("左上の箱")
+    expect(page.locator("#draft-quote svg.ico")).to_have_count(1)
     submit(page, "この箱の色を変える", 1)
 
     c = storage.load_session(sid)["comments"][0]
@@ -444,7 +445,7 @@ def test_admin_page_shows_region_screenshot(open_review, web_port):
     page.wait_for_function(
         "() => { const i = document.querySelector('img.region-thumb');"
         " return !!(i && i.complete && i.naturalWidth > 0); }")
-    expect(page.locator(f'[data-detail="{sid}"]')).to_contain_text("▭ 範囲「左上の箱」")
+    expect(page.locator(f'[data-detail="{sid}"]')).to_contain_text("範囲「左上の箱」")
 
 
 # ---------- 撮影が画面とずれやすい条件 ----------
@@ -462,7 +463,7 @@ def capture_and_compare(page, sid, x, y, w, h, count):
     reference = page.screenshot(clip={"x": x, "y": y, "width": w, "height": h})
     page.evaluate(
         "() => { document.getElementById('region-layer').style.visibility = ''; }")
-    if "on" not in (page.locator("#btn-region").get_attribute("class") or ""):
+    if page.locator("#btn-region").get_attribute("aria-pressed") != "true":
         page.click("#btn-region")
     draw(page, x, y, w, h)
     submit(page, f"範囲{count}", count)

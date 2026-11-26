@@ -62,7 +62,7 @@ def test_toggle_shows_and_hides_ai_diff(diff_review):
     btn = page.locator("#btn-aidiff")
     expect(btn).to_be_visible()
     btn.click()
-    expect(btn).to_have_class("on")
+    expect(btn).to_have_attribute("aria-pressed", "true")
     # AIが消した行が幽霊テキストとして見える（改行は¶で示す）
     dels = page.locator("#editor .ai-del")
     expect(dels).to_have_count(2)
@@ -74,7 +74,7 @@ def test_toggle_shows_and_hides_ai_diff(diff_review):
     assert any("大きく" in t for t in ins_texts)
     # もう一度押すと全部消える
     btn.click()
-    expect(btn).not_to_have_class("on")
+    expect(btn).to_have_attribute("aria-pressed", "false")
     expect(page.locator("#editor .ai-del")).to_have_count(0)
     assert page.evaluate("() => CSS.highlights.has('hle-ai-ins')") is False
 
@@ -147,7 +147,7 @@ def test_state_persists_across_reload(diff_review):
     expect(page.locator("#editor .ai-del")).to_have_count(2)
     page.reload()
     page.wait_for_selector("#editor p")
-    expect(page.locator("#btn-aidiff")).to_have_class("on")
+    expect(page.locator("#btn-aidiff")).to_have_attribute("aria-pressed", "true")
     expect(page.locator("#editor .ai-del")).to_have_count(2)
 
 

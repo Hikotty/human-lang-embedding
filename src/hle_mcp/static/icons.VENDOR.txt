@@ -1,0 +1,38 @@
+static/icons.js の出所（このリポジトリに同梱している第三者の素材）
+名前        : Material Symbols（Google）。Outlined、太さ 400、塗りなし（FILL 0）、グレード 0、24px
+取得元      : https://github.com/google/material-design-icons の symbols/web/<名前>/materialsymbolsoutlined/<名前>_24px.svg
+固定した版  : コミット 10ecc14790612ca8fd164e3f4ffe9c16fc50d5b7（2026-10-23 の "Update Symbols"。2026-11-25 に取得）
+ライセンス  : Apache-2.0（全文は icons.LICENSE.txt。同じコミットの LICENSE を無加工で配置）
+使い方      : SVG の path の d だけを icons.js に写し、viewBox="0 -960 960 960" の <svg> で描く。
+              アイコンフォントは使わない（CSP にフォントの取得を足さないため）。
+アイコンを足すときは、同じコミット（か新しいコミット）から取り、下の一覧と icons.js を更新する。
+tests/test_icons.py が、icons.js の path が下の SHA-256 の SVG と一致することを確かめる。
+style.css の画像コメントの印（comment）も、同じ path を data: URL の mask にしている。
+
+名前 / 取得した SVG の SHA-256
+  add_comment            d40126f783aaaf80dfe074fba3cd26b4455332612307cff0268c778a5154d667
+  add_photo_alternate    91235a2bf9aa016aad4036bca72e994584a913cdaf2dec57535263f6c4c02c11
+  check                  01edd53418816632be08e9565b8ca40d9028c230a8a67baaf4b8a1de20db00e6
+  close                  a82592b0faa0b104a4d4b0530bb05c6a4bfed5728f5aad03ae8e7a19f32b5511
+  comment                ab90eadc058cbf6ab37cb705c2f9b90ec7f42c3859d8cf6245bdede813090924
+  dark_mode              b45f29f9b3268bb674a00c025b619292e36a86e6dc6b28851f954763d943eca7
+  dashboard              b9de40587e23293bbd7328bafbc1e3963da0166a3aacb9844f8317dd014bf9f0
+  delete                 ec75e756af4e37a926a2f64ef8f59eac85276a658fc8a7aef0cc12c5e871e971
+  difference             b80b212b9dd5418cdbcdf6792aea2d9f7c82425a900630b9c94eb09c7d3a06c7
+  edit                   f3f51206ef9bf7d34db55058aa6be3e4f307c2d749fb8071785c360a84fa1622
+  edit_note              251e013d6996774f8f878d957e50c22bbbf5dc13665a0035eff39258c9b49915
+  expand_less            c226790222367980dcb9366768440a1bdbc778f6f957f6de878d39b523632528
+  expand_more            6760bd2307f7ec3c1a5f2905af907aa7a12ad5ad7448289c8624f5d5ec6057e4
+  format_list_bulleted   11ac8fe41f16a1cbc8961387392fa1adddfb52f91c3bf761269045e145857fb3
+  forum                  08c85b119250ffc7c094b6f31ea43eb362f2e83bca432f6a928bc34499f66938
+  image                  529a1c66444e63ab1425fbf7b354a8c6e284aee654a0fc9b05df44b9cf7c7269
+  movie                  b037f2324951459f7ef1f78ac0c7a9d0e57848e5cf88160757aeafafc51d758c
+  person                 42f1c6f70aaea6be1bce078d1bd3bdc027a343943827443fe3ea46320b9dac96
+  redo                   840dbef868ae7c527bbf13a1bbb31b16b04eed24ce95ee33000c51d5157a4bca
+  refresh                e56d7ee330abd6d410cca7778419c524cebacf300c3b6e1b97ca9d0f3c3c1f7c
+  screenshot_region      d00eda5d2d3993246f7d20cf9b1df64467a7bed9986f07ebfd1934f56ac2ae32
+  send                   34e2232851b874c646ed77f1e90b85c9649e25605c636efdc351673579487675
+  smart_toy              60aaad055401e813e6c849f43bfbea7a30198d2dcdc1caf23a5e2a64d7d97651
+  task_alt               ac591138170daa88019cfe1eba5f3e67c7b03e9db192ff016817602d6bf2bcf7
+  undo                   ed40d5c1ea954d7bd5e292e744b315662252685374dc7a86ed5ad872014244be
+  volume_up              53e1499625a35bba9a86ae6650845357e937709b1f872d7bae1d513c4ef0dc5f

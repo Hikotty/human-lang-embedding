@@ -75,7 +75,8 @@
     if (c.target !== 'region') return '「' + esc(c.quote) + '」';
     const url = '/api/sessions/' + encodeURIComponent(sid) + '/files/' +
       encodeURIComponent(c.image || '');
-    return '▭ 範囲「' + esc(c.quote || '文字なし') + '」' +
+    return '<span class="inline-ico">' + HleIcons.html('screenshot_region') + '</span>' +
+      '範囲「' + esc(c.quote || '文字なし') + '」' +
       (c.image ? '<a href="' + esc(url) + '" target="_blank" rel="noopener">' +
         '<img class="region-thumb" src="' + esc(url) +
         '" alt="範囲のスクリーンショット"></a>' : '');
@@ -159,6 +160,14 @@
       : '<span class="badge">校正中</span>';
   }
 
+  /* 校正結果の開閉ボタン。アイコンの向きと名前（読み上げ・ツールチップ）を変える */
+  function setToggle(btn, open) {
+    const label = open ? '校正結果を隠す' : '校正結果を表示';
+    btn.title = label;
+    btn.setAttribute('aria-label', label);
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    HleIcons.set(btn, open ? 'expand_less' : 'expand_more');
+  }
   function card(s) {
     const el = document.createElement('div');
     el.className = 'admin-card';
@@ -171,8 +180,11 @@
       (s.workspace ? esc(s.workspace) + '　' : '') +
       '更新: ' + esc(fmtDate(s.updated_at)) + '</div>' +
       '<div class="row">' +
-      '<button data-toggle="' + esc(s.id) + '">校正結果を表示</button>' +
-      '<a class="button" href="/session/' + esc(s.id) + '">エディタで開く</a>' +
+      '<button class="icon-btn" data-toggle="' + esc(s.id) + '" title="校正結果を表示" ' +
+      'aria-label="校正結果を表示" aria-expanded="false">' + HleIcons.html('expand_more') +
+      '</button>' +
+      '<a class="icon-btn" href="/session/' + esc(s.id) + '" title="エディタで開く" ' +
+      'aria-label="エディタで開く">' + HleIcons.html('edit_note') + '</a>' +
       '</div>' +
       '<div class="admin-detail" data-detail="' + esc(s.id) + '" hidden></div>';
     return el;
@@ -197,12 +209,12 @@
       btn.addEventListener('click', async () => {
         if (detail.hidden) {
           detail.hidden = false;
-          btn.textContent = '校正結果を隠す';
+          setToggle(btn, true);
           openDetails.add(s.id);
           await renderDetail(detail, s.id);
         } else {
           detail.hidden = true;
-          btn.textContent = '校正結果を表示';
+          setToggle(btn, false);
           openDetails.delete(s.id);
         }
       });

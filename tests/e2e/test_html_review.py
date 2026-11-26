@@ -215,7 +215,7 @@ def test_svg_figure_can_be_commented(html_review):
     page, sid, _messages = html_review
     click_in_frame(page, "svg")
     page.click("#btn-comment")
-    expect(page.locator("#draft-quote")).to_have_text("🖼 図（SVG）")
+    expect(page.locator("#draft-quote")).to_have_text("図（SVG）")
     page.fill("#draft-text", "この図の配色を本文と揃えて")
     page.click("#draft-submit")
     expect(page.locator(".comment-card")).to_have_count(1)
@@ -235,7 +235,7 @@ def test_img_comment_uses_alt_as_label(html_review):
     page, sid, _messages = html_review
     click_in_frame(page, "#fig")
     page.click("#btn-comment")
-    expect(page.locator("#draft-quote")).to_have_text("🖼 構成図")
+    expect(page.locator("#draft-quote")).to_have_text("構成図")
     page.fill("#draft-text", "画像を新しいものに差し替えて")
     page.click("#draft-submit")
     expect(page.locator(".comment-card")).to_have_count(1)
@@ -447,4 +447,4 @@ def test_click_on_commented_svg_text_opens_card_else_selects_figure(
         """() => document.getElementById('doc-frame').contentDocument
             .querySelector('#fig').getAttribute('data-hle-obj') === 'sel'""")
     page.click("#btn-comment")
-    expect(page.locator("#draft-quote")).to_have_text("🖼 構成図 v1")
+    expect(page.locator("#draft-quote")).to_have_text("構成図 v1")

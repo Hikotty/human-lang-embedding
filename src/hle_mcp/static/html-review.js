@@ -128,7 +128,10 @@
       (session.workspace ? '　' + esc(session.workspace) : '');
     const done = session.status === 'reviewed';
     $('#btn-complete').classList.toggle('done', done);
-    $('#btn-complete').textContent = done ? '✔ 校正完了済み' : '✔ 校正完了';
+    // アイコンは同じ。済んだら緑にし、名前（読み上げ・ツールチップ）を変える
+    const label = done ? '校正完了済み' : '校正完了';
+    $('#btn-complete').title = label;
+    $('#btn-complete').setAttribute('aria-label', label);
   }
 
   /* ---------- iframe（レビュー対象ドキュメント） ---------- */
@@ -502,8 +505,8 @@
         image_ref: ref, element: selectedObj,
       };
       const tag = selectedObj.tagName.toLowerCase();
-      const icon = tag === 'video' ? '🎬' : tag === 'audio' ? '🔊' : '🖼';
-      showDraft(icon + ' ' + label);
+      const icon = tag === 'video' ? 'movie' : tag === 'audio' ? 'volume_up' : 'image';
+      showDraft(label, null, false, icon);
       return;
     }
     captureSelection(); // 選択が残っていれば最新の内容に更新する
@@ -519,7 +522,8 @@
   /* 下書き欄を開く。shotUrl を渡すと、AIに渡るスクリーンショットを添えて
      見せる。keepInput なら、開いている下書きの本文と種類を残したまま対象
      だけを差し替える（範囲を囲み直したとき、書いた文を消さないため） */
-  function showDraft(label, shotUrl, keepInput) {
+  /* icon は、対象の種類を示すアイコン（Material Symbols の名前。無ければ文字だけ） */
+  function showDraft(label, shotUrl, keepInput, icon) {
     paintHighlights();
     const box = $('#comment-draft');
     const reuse = !!keepInput && !box.hidden;
@@ -533,6 +537,7 @@
       img.alt = '囲んだ範囲のスクリーンショット（AIに渡る画像）';
       q.appendChild(img);
     }
+    if (icon) q.appendChild(HleIcons.svg(icon));
     q.appendChild(document.createTextNode(label));
     if (!reuse) {
       // 種類は毎回「指摘」から始める（前の下書きの選択を持ち越さない）
@@ -683,8 +688,10 @@
       '<textarea class="edit-text" rows="3" data-edit-input="' + key +
       '">' + esc(text) + '</textarea>' +
       '<div class="card-actions edit-actions">' +
-      '<button class="primary" data-edit-save="' + key + '">保存</button>' +
-      '<button data-edit-cancel="1">キャンセル</button></div>';
+      '<button class="icon-btn primary" data-edit-save="' + key + '" title="保存" ' +
+      'aria-label="保存">' + HleIcons.html('check') + '</button>' +
+      '<button class="icon-btn" data-edit-cancel="1" title="キャンセル" ' +
+      'aria-label="キャンセル">' + HleIcons.html('close') + '</button></div>';
   }
 
   function bodyHtml(cid, rid, o) {
@@ -692,15 +699,19 @@
     const key = targetKey(cid, rid);
     return '<div class="body">' + esc(o.text) + '</div>' +
       '<div class="card-actions">' +
-      '<button data-edit="' + key + '">編集</button>' +
-      '<button class="danger" data-del="' + key + '">削除</button></div>';
+      '<button class="icon-btn" data-edit="' + key + '" title="編集" aria-label="編集">' +
+      HleIcons.html('edit') + '</button>' +
+      '<button class="icon-btn danger" data-del="' + key + '" title="削除" ' +
+      'aria-label="削除">' + HleIcons.html('delete') + '</button></div>';
   }
 
   /* 返信欄（app.jsと同じ）。書いた分だけ伸ばすのはCSSが受け持つ */
   function replyRowHtml(cid) {
     return '<div class="reply-row"><textarea rows="1" placeholder="返信を入力" ' +
       'title="Enterで送信、Shift+Enterで改行" data-reply="' + esc(cid) +
-      '"></textarea><button data-send="' + esc(cid) + '">送信</button></div>';
+      '"></textarea><button class="icon-btn primary" data-send="' + esc(cid) +
+      '" title="送信（Enter）" aria-label="送信">' + HleIcons.html('send') +
+      '</button></div>';
   }
 
   /* Enter で送信、Shift+Enter で改行。IMEの確定のEnterでは送らない */
@@ -725,12 +736,16 @@
       const url = '/api/sessions/' + encodeURIComponent(sid) + '/files/' +
         encodeURIComponent(c.image || '');
       return '<div class="quote img-quote" title="クリックでページの位置へ">' +
-        '<img src="' + esc(url) + '" alt=""><span>C' + n + ': ▭ ' +
+        '<img src="' + esc(url) + '" alt=""><span>C' + n + ': ' +
+        '<span class="inline-ico">' + HleIcons.html('screenshot_region') + '</span>' +
         esc(c.quote || '範囲（文字なし）') + '</span>' + revNote(c) + '</div>';
     }
     return '<div class="quote" title="クリックでページの位置へ">C' + n + ': ' +
       revNote(c) +
-      esc(c.target === 'image' ? '🖼 ' + (c.image || c.quote) : c.quote) +
+      (c.target === 'image'
+        ? '<span class="inline-ico">' + HleIcons.html('image') + '</span>' +
+          esc(c.image || c.quote)
+        : esc(c.quote)) +
       '</div>';
   }
 
@@ -739,7 +754,8 @@
     if (!session.comments.length) {
       list.innerHTML = '<div class="empty-note">コメントはまだありません。<br>' +
         '文字列を選択、または画像・図をクリックして<br>' +
-        '「💬 コメント」を押すと追加できます。</div>';
+        '<span class="inline-ico">' + HleIcons.html('add_comment') + '</span>' +
+        ' を押すと追加できます。</div>';
       return;
     }
     // 番号は全コメントの通し番号を保ち、絞り込みで隠すものだけ描かない
@@ -1476,7 +1492,7 @@
       selectedObj = null;
       lastSel = null;
       pendingRect = null;
-      showDraft('▭ ' + (draft.quote || '範囲（文字なし）'), shot, true);
+      showDraft(draft.quote || '範囲（文字なし）', shot, true, 'screenshot_region');
     } catch (e) {
       pendingRect = null;
       paintRegions();

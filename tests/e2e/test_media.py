@@ -181,12 +181,12 @@ def test_comment_on_audio_player(media_review):
     _wait_media_ready(page, "#editor audio")
     page.locator('#editor .img-para[data-img="tone.mp3"] audio').click()
     page.click("#btn-comment")
-    expect(page.locator("#draft-quote")).to_have_text("🔊 tone.mp3")
+    expect(page.locator("#draft-quote")).to_have_text("tone.mp3")
     page.fill("#draft-text", "ナレーションの声が小さい")
     page.click("#draft-submit")
     card = page.locator(".comment-card")
     expect(card).to_have_count(1)
-    expect(card.locator(".media-icon")).to_have_text("🔊")
+    expect(card.locator(".media-icon svg.ico")).to_have_count(1)
     para = page.locator('#editor .img-para[data-img="tone.mp3"]')
     assert para.get_attribute("data-cids")
     wait_saved(page)
@@ -212,7 +212,7 @@ def _caret_at_end_of_first_paragraph(page):
 
 
 def test_add_video_and_audio_via_button(media_review, tmp_path):
-    """🖼 メディアのボタンで動画と音声をまとめて追加すると、選んだ順に
+    """メディアのボタンで動画と音声をまとめて追加すると、選んだ順に
     キャレットの段落の後ろへ並び、そのまま再生できる。"""
     page, sid, errors, _ = media_review
     _caret_at_end_of_first_paragraph(page)
@@ -350,7 +350,7 @@ def test_file_input_accepts_every_supported_extension(media_review):
     accept = page.locator("#image-input").get_attribute("accept") or ""
     assert set(accept.split(",")) == set(storage.MEDIA_TYPES)
     assert page.locator("#image-input").get_attribute("multiple") is not None
-    expect(page.locator("#btn-image")).to_have_text("🖼 メディア")
+    expect(page.locator("#btn-image")).to_have_attribute("aria-label", "メディアを追加")
 
 
 def test_admin_shows_media_badges_by_kind(browser, web_port):
@@ -398,8 +398,8 @@ def test_html_review_plays_and_comments_on_data_uri_media(browser, web_port):
                    els.every((el) => el.readyState >= 1 && el.duration > 0);
         }""", timeout=10000)
     frame = page.frame_locator("#doc-frame")
-    for selector, label, ref in (("audio", "🔊 音声（埋め込み）", "audio:0"),
-                                 ("video", "🎬 操作デモ", "video:0")):
+    for selector, label, ref in (("audio", "音声（埋め込み）", "audio:0"),
+                                 ("video", "操作デモ", "video:0")):
         frame.locator(selector).click()
         page.click("#btn-comment")
         expect(page.locator("#draft-quote")).to_have_text(label)

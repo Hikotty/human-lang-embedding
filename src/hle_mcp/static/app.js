@@ -163,6 +163,7 @@
     aiDiffOn = on;
     const count = Tracker.setAiDiff(on ? session.prev_result_text : null);
     $('#btn-aidiff').classList.toggle('on', on);
+    $('#btn-aidiff').setAttribute('aria-pressed', on ? 'true' : 'false');
     try {
       if (on) localStorage.setItem('hle-aidiff-' + sid, '1');
       else localStorage.removeItem('hle-aidiff-' + sid);
@@ -191,7 +192,10 @@
       (session.workspace ? '　' + esc(session.workspace) : '');
     const done = session.status === 'reviewed';
     $('#btn-complete').classList.toggle('done', done);
-    $('#btn-complete').textContent = done ? '✔ 校正完了済み' : '✔ 校正完了';
+    // アイコンは同じ。済んだら緑にし、名前（読み上げ・ツールチップ）を変える
+    const label = done ? '校正完了済み' : '校正完了';
+    $('#btn-complete').title = label;
+    $('#btn-complete').setAttribute('aria-label', label);
   }
 
   /* ---------- ブラウザへの退避 ----------
@@ -337,7 +341,8 @@
   /* ---------- メディア（画像・動画・音声） ----------
      受け付ける形式と上限はサーバー（/api/media）が持つ。取れなかったときは
      画像だけを受け付ける（サーバー側でも同じ確認をする） */
-  const MEDIA_ICONS = { image: '🖼', video: '🎬', audio: '🔊' };
+  // メディアの種類ごとのアイコン（Material Symbols の名前）
+  const MEDIA_ICONS = { image: 'image', video: 'movie', audio: 'volume_up' };
   const FALLBACK_MEDIA = {
     types: { '.png': { kind: 'image', mime: 'image/png' },
       '.jpg': { kind: 'image', mime: 'image/jpeg' },
@@ -369,8 +374,8 @@
     return t ? t.kind : null;
   }
 
-  function mediaIcon(name) {
-    return MEDIA_ICONS[mediaKind(name) || 'image'];
+  function mediaLabel(name) {
+    return mediaConf.labels[mediaKind(name) || 'image'] || '画像';
   }
 
   function sizeText(n) {
@@ -407,7 +412,7 @@
     return '';
   }
 
-  /* ファイル（貼り付け・ドロップ・🖼ボタン）を添付し、本文に段落として入れる。
+  /* ファイル（貼り付け・ドロップ・メディアのボタン）を添付し、本文に段落として入れる。
      after を渡されたらその段落の後ろから順に、渡されなければキャレットの
      段落の後ろから順に並べる */
   async function handleMediaFiles(files, after) {
@@ -422,12 +427,12 @@
     if (problems.length) alert(problems.join('\n\n'));
     let anchor = after || null;
     for (const item of ok) {
-      toast(mediaIcon(item.name) + ' ' + item.name + ' を追加しています…');
+      toast(mediaLabel(item.name) + '「' + item.name + '」を追加しています…');
       try {
         const res = await uploadMedia(item.file, item.name);
         anchor = Tracker.insertImageParagraph(res.name, anchor);
         onEdited();
-        toast(mediaIcon(res.name) + ' ' + res.name + ' を追加しました');
+        toast(mediaLabel(res.name) + '「' + res.name + '」を追加しました');
       } catch (e) {
         alert('「' + item.name + '」の追加に失敗しました: ' + e.message);
       }
@@ -471,7 +476,7 @@
     if (img) {
       if (!Tracker.addImageComment(cid)) return;
       draftTarget = { target: 'image', quote: img.md, image: img.name };
-      showDraft(cid, MEDIA_ICONS[img.kind || 'image'] + ' ' + img.name);
+      showDraft(cid, img.name, MEDIA_ICONS[img.kind || 'image']);
     } else {
       // AI差分の幽霊テキスト（.ai-del）と改行マーカーは引用に含めない
       const box = document.createElement('div');
@@ -484,10 +489,12 @@
     }
   }
 
-  function showDraft(cid, label) {
+  /* icon は対象がメディアのときの種類のアイコン（Material Symbols の名前） */
+  function showDraft(cid, label, icon) {
     draftCid = cid;
     $('#comment-draft').hidden = false;
     $('#draft-quote').textContent = label;
+    if (icon) $('#draft-quote').prepend(HleIcons.svg(icon));
     // 種類は毎回「指摘」から始める（前の下書きの選択を持ち越さない）
     $('#draft-tag').innerHTML = tagSelectHtml('draft-tag', 'issue');
     bindTagSelect($('#draft-tag'));
@@ -702,8 +709,10 @@
       '<textarea class="edit-text" rows="3" data-edit-input="' + key +
       '">' + esc(text) + '</textarea>' +
       '<div class="card-actions edit-actions">' +
-      '<button class="primary" data-edit-save="' + key + '">保存</button>' +
-      '<button data-edit-cancel="1">キャンセル</button></div>';
+      '<button class="icon-btn primary" data-edit-save="' + key + '" title="保存" ' +
+      'aria-label="保存">' + HleIcons.html('check') + '</button>' +
+      '<button class="icon-btn" data-edit-cancel="1" title="キャンセル" ' +
+      'aria-label="キャンセル">' + HleIcons.html('close') + '</button></div>';
   }
 
   /* 古い稿に付けたコメントは、今の本文では文が書き換わっていることがある。
@@ -721,12 +730,12 @@
     if (c.target === 'image' && c.image) {
       const url = '/api/sessions/' + encodeURIComponent(sid) +
         '/files/' + encodeURIComponent(c.image);
-      // 動画・音声はカードを描き直すたびに読み込ませないよう、絵文字で示す
+      // 動画・音声はカードを描き直すたびに読み込ませないよう、アイコンで示す
       const kind = mediaKind(c.image) || 'image';
       const thumb = kind === 'image'
         ? '<img src="' + esc(url) + '" alt="">'
-        : '<span class="media-icon" aria-hidden="true">' + MEDIA_ICONS[kind] +
-          '</span>';
+        : '<span class="media-icon" aria-hidden="true">' +
+          HleIcons.html(MEDIA_ICONS[kind]) + '</span>';
       return '<div class="quote img-quote" title="クリックで本文の位置へ">' +
         thumb + '<span>C' + n + ': ' +
         esc(c.image) + '</span>' + revNote(c) + '</div>';
@@ -741,15 +750,19 @@
     const key = targetKey(cid, rid);
     return '<div class="body">' + esc(o.text) + '</div>' +
       '<div class="card-actions">' +
-      '<button data-edit="' + key + '">編集</button>' +
-      '<button class="danger" data-del="' + key + '">削除</button></div>';
+      '<button class="icon-btn" data-edit="' + key + '" title="編集" aria-label="編集">' +
+      HleIcons.html('edit') + '</button>' +
+      '<button class="icon-btn danger" data-del="' + key + '" title="削除" ' +
+      'aria-label="削除">' + HleIcons.html('delete') + '</button></div>';
   }
 
   /* 返信欄。長い返信も書けるよう textarea にし、書いた分だけ伸ばす（CSS） */
   function replyRowHtml(cid) {
     return '<div class="reply-row"><textarea rows="1" placeholder="返信を入力" ' +
       'title="Enterで送信、Shift+Enterで改行" data-reply="' + esc(cid) +
-      '"></textarea><button data-send="' + esc(cid) + '">送信</button></div>';
+      '"></textarea><button class="icon-btn primary" data-send="' + esc(cid) +
+      '" title="送信（Enter）" aria-label="送信">' + HleIcons.html('send') +
+      '</button></div>';
   }
 
   /* Enter で送信し、Shift+Enter は改行として入力させる。IMEの変換を確定する
@@ -764,7 +777,7 @@
     const list = $('#comment-list');
     if (!session.comments.length) {
       list.innerHTML = '<div class="empty-note">コメントはまだありません。<br>' +
-        '本文を選択して「💬 コメント」を押すと追加できます。</div>';
+        '本文を選択して ' + '<span class="inline-ico">' + HleIcons.html('add_comment') + '</span>' + ' を押すと追加できます。</div>';
       applyCommentFilterToBody();
       return;
     }

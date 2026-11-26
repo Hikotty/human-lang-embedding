@@ -15,15 +15,20 @@
     </div>
     <div id="actions">
       <span id="save-state" title="保存状態"></span>
-      <button id="btn-aidiff" hidden
-              title="前の稿からAIが変えた箇所を青で表示する（削除は取り消し線、追加は青字）">🔵 AI差分</button>
-      <button id="btn-undo" title="元に戻す (Cmd+Z)">↩ 元に戻す</button>
-      <button id="btn-redo" title="やり直す (Cmd+Shift+Z)">↪ やり直す</button>
-      <button id="btn-image" title="カーソル位置に画像・動画・音声を追加する（本文へのドロップ・貼り付けでも追加できる）">🖼 メディア</button>
-      <input type="file" id="image-input" accept="image/*,video/*,audio/*" multiple hidden>
-      <button id="btn-comment" title="選択範囲、またはクリックで選んだ画像・動画・音声にコメントを付ける">💬 コメント</button>
-      <button id="btn-complete">✔ 校正完了</button>
-      <a class="nav-link" href="/admin" title="全セッションの校正結果を見る">管理画面</a>
+      <button id="btn-aidiff" class="icon-btn" hidden aria-pressed="false"
+              title="AI差分: 前の稿からAIが変えた箇所を青で表示する（削除は取り消し線、追加は青字）"
+              aria-label="AI差分"><span data-icon="difference"></span></button>
+      <span class="tb-group">
+        <button id="btn-undo" class="icon-btn" title="元に戻す (Cmd+Z)" aria-label="元に戻す"><span data-icon="undo"></span></button>
+        <button id="btn-redo" class="icon-btn" title="やり直す (Cmd+Shift+Z)" aria-label="やり直す"><span data-icon="redo"></span></button>
+      </span>
+      <span class="tb-group">
+        <button id="btn-image" class="icon-btn" title="メディアを追加: カーソル位置に画像・動画・音声を追加する（本文へのドロップ・貼り付けでも追加できる）" aria-label="メディアを追加"><span data-icon="add_photo_alternate"></span></button>
+        <input type="file" id="image-input" accept="image/*,video/*,audio/*" multiple hidden>
+        <button id="btn-comment" class="icon-btn" title="コメント: 選択範囲、またはクリックで選んだ画像・動画・音声・数式にコメントを付ける" aria-label="コメント"><span data-icon="add_comment"></span></button>
+      </span>
+      <button id="btn-complete" class="icon-btn primary" title="校正完了" aria-label="校正完了"><span data-icon="task_alt"></span></button>
+      <a class="nav-link icon-btn" href="/admin" title="管理画面: 全セッションの校正結果を見る" aria-label="管理画面"><span data-icon="dashboard"></span></a>
     </div>
   </header>
   <main id="main">
@@ -33,17 +38,17 @@
     <aside id="sidebar">
       <h2>コメント</h2>
       <div class="comment-filter" role="radiogroup" aria-label="コメントの絞り込み（著者別）">
-        <label><input type="radio" name="comment-filter" value="all" checked>すべて</label>
-        <label><input type="radio" name="comment-filter" value="human">人間</label>
-        <label><input type="radio" name="comment-filter" value="ai">AI</label>
+        <label title="すべてのコメント"><input type="radio" name="comment-filter" value="all" checked aria-label="すべて"><span data-icon="forum"></span></label>
+        <label title="人間のコメント"><input type="radio" name="comment-filter" value="human" aria-label="人間"><span data-icon="person"></span></label>
+        <label title="AIのコメント"><input type="radio" name="comment-filter" value="ai" aria-label="AI"><span data-icon="smart_toy"></span></label>
       </div>
       <div id="comment-draft" hidden>
         <div class="quote" id="draft-quote"></div>
         <div id="draft-tag"></div>
         <textarea id="draft-text" rows="3" placeholder="コメントを入力"></textarea>
         <div class="row">
-          <button id="draft-submit">追加</button>
-          <button id="draft-cancel" class="secondary">キャンセル</button>
+          <button id="draft-submit" class="icon-btn primary" title="コメントを追加" aria-label="追加"><span data-icon="check"></span></button>
+          <button id="draft-cancel" class="icon-btn" title="キャンセル" aria-label="キャンセル"><span data-icon="close"></span></button>
         </div>
       </div>
       <div id="comment-list"></div>
@@ -52,7 +57,7 @@
   <div id="toast" role="status" hidden></div>
   <div id="update-banner" role="status" hidden>
     校正ツールが新しい版に更新されました。再読み込みすると新しい画面になります（校正内容は保存してから読み込み直します）。
-    <button id="btn-update-reload">再読み込み</button>
+    <button id="btn-update-reload" class="icon-btn" title="再読み込み" aria-label="再読み込み"><span data-icon="refresh"></span></button>
   </div>
 </div>
 <div id="list-view" hidden>
@@ -61,11 +66,12 @@
     <div id="actions">
       <input id="search-query" placeholder="ID・タイトルで検索">
       <input id="search-workspace" placeholder="ワークスペースで検索">
-      <a class="nav-link" href="/admin">管理画面</a>
+      <a class="nav-link icon-btn" href="/admin" title="管理画面: 全セッションの校正結果を見る" aria-label="管理画面"><span data-icon="dashboard"></span></a>
     </div>
   </header>
   <main><table id="session-table"></table></main>
 </div>
+<script src="/static/icons.js"></script>
 <script src="/static/theme.js"></script>
 <script src="/static/mermaid-view.js"></script>
 <script src="/static/math-view.js"></script>

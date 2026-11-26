@@ -15,11 +15,13 @@
       <div id="doc-meta"></div>
     </div>
     <div id="actions">
-      <button id="btn-region" aria-pressed="false" title="ページ上をドラッグして囲んだ範囲にコメントを付ける（範囲のスクリーンショットがAIに渡ります）">▭ 範囲指定</button>
-      <button id="btn-comment" title="選択範囲、またはクリックで選んだ画像・図にコメントを付ける">💬 コメント</button>
-      <button id="btn-complete">✔ 校正完了</button>
-      <a class="nav-link" href="/" title="セッション一覧へ">一覧</a>
-      <a class="nav-link" href="/admin" title="全セッションの校正結果を見る">管理画面</a>
+      <span class="tb-group">
+        <button id="btn-region" class="icon-btn" aria-pressed="false" title="範囲指定: ページ上をドラッグして囲んだ範囲にコメントを付ける（範囲のスクリーンショットがAIに渡ります）" aria-label="範囲指定"><span data-icon="screenshot_region"></span></button>
+        <button id="btn-comment" class="icon-btn" title="コメント: 選択範囲、またはクリックで選んだ画像・図にコメントを付ける" aria-label="コメント"><span data-icon="add_comment"></span></button>
+      </span>
+      <button id="btn-complete" class="icon-btn primary" title="校正完了" aria-label="校正完了"><span data-icon="task_alt"></span></button>
+      <a class="nav-link icon-btn" href="/" title="セッション一覧へ" aria-label="一覧"><span data-icon="format_list_bulleted"></span></a>
+      <a class="nav-link icon-btn" href="/admin" title="管理画面: 全セッションの校正結果を見る" aria-label="管理画面"><span data-icon="dashboard"></span></a>
     </div>
   </header>
   <main id="main">
@@ -31,13 +33,14 @@
     <aside id="sidebar">
       <h2>コメント</h2>
       <div class="comment-filter" role="radiogroup" aria-label="コメントの絞り込み（著者別）">
-        <label><input type="radio" name="comment-filter" value="all" checked>すべて</label>
-        <label><input type="radio" name="comment-filter" value="human">人間</label>
-        <label><input type="radio" name="comment-filter" value="ai">AI</label>
+        <label title="すべてのコメント"><input type="radio" name="comment-filter" value="all" checked aria-label="すべて"><span data-icon="forum"></span></label>
+        <label title="人間のコメント"><input type="radio" name="comment-filter" value="human" aria-label="人間"><span data-icon="person"></span></label>
+        <label title="AIのコメント"><input type="radio" name="comment-filter" value="ai" aria-label="AI"><span data-icon="smart_toy"></span></label>
       </div>
       <div class="hint">表示されたページの文字列（図の中の文字も）を
-        ドラッグで選択するか、画像・図をクリックして「💬 コメント」を
-        押すと、その箇所にコメントを付けられます。「▭ 範囲指定」を押して
+        ドラッグで選択するか、画像・図をクリックして
+        <span class="inline-ico" data-icon="add_comment"></span>を
+        押すと、その箇所にコメントを付けられます。<span class="inline-ico" data-icon="screenshot_region"></span>を押して
         ページ上をドラッグすると、囲んだ範囲にコメントを付けられます
         （範囲のスクリーンショットがAIに渡ります。Escで終了）。</div>
       <div id="comment-draft" hidden>
@@ -45,8 +48,8 @@
         <div id="draft-tag"></div>
         <textarea id="draft-text" rows="3" placeholder="ここがこう、を入力"></textarea>
         <div class="row">
-          <button id="draft-submit">追加</button>
-          <button id="draft-cancel" class="secondary">キャンセル</button>
+          <button id="draft-submit" class="icon-btn primary" title="コメントを追加" aria-label="追加"><span data-icon="check"></span></button>
+          <button id="draft-cancel" class="icon-btn" title="キャンセル" aria-label="キャンセル"><span data-icon="close"></span></button>
         </div>
       </div>
       <div id="comment-list"></div>
@@ -55,9 +58,10 @@
   <div id="toast" role="status" hidden></div>
   <div id="update-banner" role="status" hidden>
     校正ツールが新しい版に更新されました。再読み込みすると新しい画面になります。
-    <button id="btn-update-reload">再読み込み</button>
+    <button id="btn-update-reload" class="icon-btn" title="再読み込み" aria-label="再読み込み"><span data-icon="refresh"></span></button>
   </div>
 </div>
+<script src="/static/icons.js"></script>
 <script src="/static/theme.js"></script>
 <script src="/static/html-review.js"></script>
 </body>

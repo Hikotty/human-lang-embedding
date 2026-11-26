@@ -86,27 +86,44 @@ html, body {
   background: var(--blue-bg); color: var(--blue); margin-right: 6px; font-weight: 600;
 }
 #doc-meta .badge.reviewed { background: var(--green-bg); color: var(--green); }
-#actions { display: flex; align-items: center; gap: 8px; }
-#actions button {
-  border: 1px solid var(--border); background: var(--surface); border-radius: 6px;
-  padding: 6px 12px; font-size: 13px; cursor: pointer;
+#actions { display: flex; align-items: center; gap: 4px; }
+/* 役割の近いボタンをまとめ、まとまりの間に細い仕切りを引く */
+#actions .tb-group {
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 0 6px; margin: 0 2px; border-left: 1px solid var(--divider);
+  border-right: 1px solid var(--divider);
 }
-#actions button:hover { background: var(--hover); }
-/* AI差分表示のトグル。押されている間は青で示す */
-#actions button#btn-aidiff.on {
+#actions .tb-group + .tb-group { border-left: 0; margin-left: -2px; }
+#actions #btn-complete { margin-left: 4px; }
+
+/* ---------- アイコンのボタン ----------
+   アイコンは Material Symbols（icons.js）。文字は持たず、名前は aria-label と title
+   （ツールチップ）が持つ。地は透明で、触れたときだけ色を敷く */
+.ico { display: block; width: 20px; height: 20px; fill: currentColor; flex: none; }
+.icon-btn {
+  display: inline-flex; align-items: center; justify-content: center; flex: none;
+  width: 34px; height: 34px; padding: 0; margin: 0;
+  border: 1px solid transparent; border-radius: 8px;
+  background: transparent; color: var(--text-2); cursor: pointer;
+  text-decoration: none; font: inherit;
+  transition: background-color .12s, color .12s, border-color .12s;
+}
+.icon-btn:hover { background: var(--hover); color: var(--text); }
+.icon-btn:active { transform: translateY(.5px); }
+.icon-btn:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
+.icon-btn[hidden] { display: none; }
+.icon-btn.primary { background: #1a73e8; color: #fff; }
+.icon-btn.primary:hover { background: #1765cc; color: #fff; }
+.icon-btn.danger:hover { background: var(--red-tint); color: var(--red); }
+/* 押されている間（AI差分の表示・範囲指定のモード）は青で示す */
+.icon-btn.on, .icon-btn[aria-pressed="true"] {
   background: var(--blue-bg); color: var(--blue); border-color: var(--blue);
 }
-/* 「#actions button」(1,0,1) より高い特異度にしないと背景白+文字白で不可視になる */
-#actions button#btn-complete {
-  background: #1a73e8; color: #fff; border-color: #1a73e8;
-}
-#actions button#btn-complete:hover { background: #1765cc; }
-#actions button#btn-complete.done { background: #137333; border-color: #137333; }
-#actions .nav-link {
-  font-size: 13px; color: var(--link); text-decoration: none;
-  padding: 6px 10px; border-radius: 6px;
-}
-#actions .nav-link:hover { background: var(--blue-bg); }
+/* 校正を完了したセッションは、完了のボタンを緑にする */
+#btn-complete.done, #btn-complete.done:hover { background: #137333; color: #fff; }
+/* 文の中に置く小さなアイコン（コメントの引用・空の案内など） */
+.inline-ico { display: inline-block; vertical-align: -.2em; margin-right: 3px; }
+.inline-ico .ico { width: 1.15em; height: 1.15em; }
 #save-state { font-size: 12px; color: var(--text-2); min-width: 70px; text-align: right; }
 #actions input {
   border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 13px;
@@ -428,11 +445,8 @@ html, body {
   display: flex; align-items: center; gap: 10px;
 }
 #update-banner[hidden] { display: none; }
-#update-banner button {
-  border: 1px solid #1a73e8; background: #1a73e8; color: #fff;
-  border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer;
-  flex: none;
-}
+#update-banner .icon-btn { background: #1a73e8; color: #fff; width: 30px; height: 30px; }
+#update-banner .icon-btn:hover { background: #1765cc; }
 
 /* ---------- 一時通知 ---------- */
 #toast {
@@ -451,21 +465,29 @@ html, body {
 /* ---------- コメントの絞り込み（著者別） ----------
    コメントを「すべて / 人間 / AI」で絞り込む。既定は「すべて」。
    ネイティブのラジオなのでキーボード（矢印キー）でも操作できる */
+/* コメントの絞り込み。ラジオボタンの丸は見せず、アイコンを並べた切り替えにする。
+   input はラベル全体を覆う透明な層として残す（キーボードの矢印・読み上げ・テストの
+   check() はこれまでどおり input に届く） */
 .comment-filter {
-  display: flex; gap: 6px; margin: 0 0 12px;
+  display: inline-flex; gap: 2px; margin: 0 0 12px; padding: 2px;
+  border: 1px solid var(--border); border-radius: 9px; background: var(--subtle);
 }
 .comment-filter label {
-  display: inline-flex; align-items: center; gap: 4px; cursor: pointer;
-  border: 1px solid var(--border); border-radius: 12px; padding: 1px 10px 1px 6px;
-  font-size: 12px; color: var(--text-2); background: var(--surface);
+  position: relative; display: inline-flex; align-items: center; justify-content: center;
+  width: 32px; height: 26px; border-radius: 7px; color: var(--text-2); cursor: pointer;
 }
-.comment-filter input { margin: 0; accent-color: var(--link); }
+.comment-filter label:hover { color: var(--text); }
+.comment-filter input {
+  position: absolute; inset: 0; margin: 0; opacity: 0; cursor: pointer;
+  -webkit-appearance: none; appearance: none;
+}
+.comment-filter .ico { width: 18px; height: 18px; }
 .comment-filter label:has(input:checked) {
-  color: var(--text); border-color: var(--border-strong);
-  background: var(--hover); font-weight: 700;
+  color: var(--text); background: var(--surface);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .12);
 }
-.comment-filter input:focus-visible {
-  outline: 2px solid var(--link); outline-offset: 2px;
+.comment-filter label:has(input:focus-visible) {
+  outline: 2px solid var(--link); outline-offset: 1px;
 }
 .comment-card {
   background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
@@ -487,7 +509,7 @@ html, body {
 .comment-card .quote.img-quote .media-icon {
   width: 46px; height: 32px; flex: none; border-radius: 3px; background: var(--hover);
   display: inline-flex; align-items: center; justify-content: center;
-  font-size: 18px;
+  color: var(--text-2);
 }
 .comment-card .quote .rev-note {
   display: inline-block; margin: 0 6px 0 2px; color: var(--amber-text); font-size: 10px;
@@ -515,15 +537,9 @@ html, body {
 .comment-card:hover .card-actions { opacity: 1; }
 /* 編集フォームの保存・キャンセルはホバーに依らず常にはっきり見せる */
 .comment-card .card-actions.edit-actions { opacity: 1; }
-.comment-card .card-actions button {
-  border: 1px solid var(--border); background: var(--surface); color: var(--text-2);
-  border-radius: 6px; padding: 2px 8px; font-size: 11px; cursor: pointer;
-}
-.comment-card .card-actions button:hover { background: var(--hover); }
-.comment-card .card-actions button.danger { color: var(--red); border-color: var(--red-border-soft); }
-.comment-card .card-actions button.primary {
-  background: #1a73e8; color: #fff; border-color: #1a73e8;
-}
+/* カードの操作（編集・削除・保存・取り消し）は小さめのアイコン */
+.comment-card .card-actions .icon-btn { width: 26px; height: 26px; border-radius: 6px; }
+.comment-card .card-actions .icon-btn .ico { width: 17px; height: 17px; }
 .comment-card textarea.edit-text {
   width: 100%; border: 1px solid #1a73e8; border-radius: 6px;
   padding: 6px 8px; font-size: 13px; margin: 4px 0;
@@ -539,13 +555,10 @@ html, body {
   flex: 1; min-width: 0; border: 1px solid var(--border); border-radius: 6px;
   padding: 5px 8px; font-size: 12px; font-family: inherit;
 }
-.comment-card .reply-row button, #comment-draft button {
-  border: 1px solid #1a73e8; background: #1a73e8; color: #fff;
-  border-radius: 6px; padding: 5px 10px; font-size: 12px; cursor: pointer;
-}
-#comment-draft button.secondary, .comment-card button.secondary {
-  background: var(--surface); color: var(--link);
-}
+.comment-card .reply-row .icon-btn { width: 30px; height: 30px; }
+.comment-card .reply-row .icon-btn .ico, #comment-draft .icon-btn .ico { width: 18px; height: 18px; }
+#comment-draft .row { display: flex; gap: 4px; justify-content: flex-end; }
+#comment-draft .icon-btn:not(.primary) { border-color: var(--border); }
 #comment-draft {
   background: var(--surface); border: 2px solid #f9ab00; border-radius: 8px;
   padding: 10px 12px; margin-bottom: 12px;
@@ -554,6 +567,9 @@ html, body {
   font-size: 11px; color: var(--text-2); border-left: 3px solid #f9ab00;
   padding: 2px 6px; margin-bottom: 6px; background: var(--amber-bg);
 }
+/* 対象がメディア・範囲のときの種類のアイコン（文字の前に置く） */
+#comment-draft .quote > .ico { display: inline-block; width: 1.2em; height: 1.2em;
+  vertical-align: -.25em; margin-right: 4px; color: var(--text-2); }
 #comment-draft textarea {
   width: 100%; border: 1px solid var(--border); border-radius: 6px;
   padding: 6px 8px; font-size: 13px;
@@ -647,10 +663,14 @@ html, body {
 #editor .img-para[data-cids] {
   border-style: solid; border-color: #f9ab00; background: var(--amber-bg);
 }
+/* コメントの印（Material Symbols の comment。icons.js と同じ path を mask にする） */
 #editor .img-para[data-cids]::before {
-  content: "💬"; position: absolute; top: 3px; right: 5px; font-size: 12px;
+  content: ""; position: absolute; top: 4px; right: 5px; width: 15px; height: 15px;
+  background-color: #b06000;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%20-960%20960%20960%22%3E%3Cpath%20d%3D%22M240-400h480v-80H240v80Zm0-120h480v-80H240v80Zm0-120h480v-80H240v80ZM880-80%20720-240H160q-33%200-56.5-23.5T80-320v-480q0-33%2023.5-56.5T160-880h640q33%200%2056.5%2023.5T880-800v720ZM160-320h594l46%2045v-525H160v480Zm0%200v-480%20480Z%22%2F%3E%3C%2Fsvg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%20-960%20960%20960%22%3E%3Cpath%20d%3D%22M240-400h480v-80H240v80Zm0-120h480v-80H240v80Zm0-120h480v-80H240v80ZM880-80%20720-240H160q-33%200-56.5-23.5T80-320v-480q0-33%2023.5-56.5T160-880h640q33%200%2056.5%2023.5T880-800v720ZM160-320h594l46%2045v-525H160v480Zm0%200v-480%20480Z%22%2F%3E%3C%2Fsvg%3E") center / contain no-repeat;
 }
-/* フィルタで隠れた画像コメントは枠と💬を消す */
+/* フィルタで隠れた画像コメントは枠と印を消す */
 #editor .img-para.cmt-filtered[data-cids] {
   border-style: dashed; border-color: transparent; background: transparent;
 }
@@ -684,6 +704,7 @@ html, body {
 .theme-toggle input {
   position: absolute; inset: 0; margin: 0; opacity: 0; cursor: pointer;
 }
+.theme-toggle .ico { width: 18px; height: 18px; }
 .theme-toggle .switch {
   position: relative; flex: none; width: 32px; height: 18px;
   border-radius: 9px; background: #80868b; transition: background .15s;
@@ -715,12 +736,7 @@ html, body {
 .admin-card .row { display: flex; gap: 8px; align-items: center; }
 /* CSPでインラインstyle属性を禁止しているためクラスとして定義する */
 .admin-card .row.spread { justify-content: space-between; }
-.admin-card button, .admin-card a.button {
-  border: 1px solid var(--border); background: var(--surface); border-radius: 6px;
-  padding: 5px 12px; font-size: 12px; cursor: pointer;
-  color: var(--link); text-decoration: none; display: inline-block;
-}
-.admin-card button:hover, .admin-card a.button:hover { background: var(--hover); }
+.admin-card .icon-btn { width: 30px; height: 30px; color: var(--link); }
 .admin-detail { border-top: 1px solid var(--hover); margin-top: 10px; padding-top: 10px; }
 .admin-detail h4 { font-size: 12px; color: var(--text-2); margin: 12px 0 4px; }
 .annotated {

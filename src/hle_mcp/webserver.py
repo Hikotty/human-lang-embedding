@@ -1061,7 +1061,7 @@ def self_test() -> None:
     try:
         base = f"http://127.0.0.1:{srv.server_address[1]}"
         paths = ["/api/health", "/api/media", "/api/settings", "/", "/admin",
-                 "/static/theme.js", "/static/app.js",
+                 "/static/theme.js", "/static/icons.js", "/static/app.js",
                  "/static/tracker.js", "/static/mermaid-view.js",
                  "/static/mermaid-frame.html", "/static/mermaid-frame.js",
                  "/static/mermaid.min.js",

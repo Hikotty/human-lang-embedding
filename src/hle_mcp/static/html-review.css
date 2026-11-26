@@ -71,11 +71,7 @@
 }
 .region-box.stale .region-tag { background: #80868b; }
 .region-box.stale.active { border-color: #f57c00; }
-#actions button#btn-region.on {
-  background: var(--blue-bg);
-  color: var(--blue);
-  border-color: var(--blue);
-}
+/* 範囲指定のモードの間は、ボタンを押した状態（.on）で示す（style.css の .icon-btn.on） */
 /* 下書き欄には、AIに渡るスクリーンショットをそのまま見せる */
 #comment-draft .quote.shot-quote img {
   display: block;

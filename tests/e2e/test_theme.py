@@ -68,7 +68,7 @@ def _is_on(page) -> bool:
 
 def _toggle(page) -> None:
     """人がするように、トグルの文字（ラベル）を押す。"""
-    page.locator(".theme-toggle", has_text="ダークモード").click()
+    page.locator(".theme-toggle").click()
 
 
 @pytest.fixture()

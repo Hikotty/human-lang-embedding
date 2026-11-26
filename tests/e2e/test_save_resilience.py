@@ -104,7 +104,7 @@ def test_complete_is_refused_while_unsaved(review):
             break
         page.wait_for_timeout(100)
     assert messages and "保存できていない" in messages[0]
-    expect(page.locator("#btn-complete")).to_have_text("✔ 校正完了")
+    expect(page.locator("#btn-complete")).to_have_attribute("aria-label", "校正完了")
     assert storage.load_session(sid)["status"] == "editing"
 
 
