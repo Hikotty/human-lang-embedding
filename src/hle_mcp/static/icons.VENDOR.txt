@@ -31,6 +31,7 @@ style.css の画像コメントの印（comment）も、同じ path を data: UR
   person                 42f1c6f70aaea6be1bce078d1bd3bdc027a343943827443fe3ea46320b9dac96
   redo                   840dbef868ae7c527bbf13a1bbb31b16b04eed24ce95ee33000c51d5157a4bca
   refresh                e56d7ee330abd6d410cca7778419c524cebacf300c3b6e1b97ca9d0f3c3c1f7c
+  remove_done            be63110e7dcdf0ae386e43186cb4e036ba86403bf386a5466afc8eea90b06d6a
   screenshot_region      d00eda5d2d3993246f7d20cf9b1df64467a7bed9986f07ebfd1934f56ac2ae32
   send                   34e2232851b874c646ed77f1e90b85c9649e25605c636efdc351673579487675
   smart_toy              60aaad055401e813e6c849f43bfbea7a30198d2dcdc1caf23a5e2a64d7d97651

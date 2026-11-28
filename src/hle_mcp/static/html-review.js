@@ -644,8 +644,69 @@
       renderComments();
       applyHighlights();
     } catch (e) {
-      alert('解決済みにできませんでした: ' + e.message);
+      alert((resolved ? '解決済みにできませんでした: ' : '未解決に戻せませんでした: ') +
+        e.message);
     }
+  }
+
+  /* ---------- コメント一覧の区分（app.jsと同じ） ----------
+     未解決のコメントを、今の稿へのもの（この稿）と前の稿へのもの（過去の稿）に
+     分け、解決済みはそのどちらとも別の区分にまとめる。解決済みは既定で
+     畳んでおき、見出しのボタンで開く。区分が「この稿」だけなら見出しを出さない */
+  const GROUP_LABELS = { current: 'この稿', past: '過去の稿', resolved: '解決済み' };
+  let resolvedOpen = false;
+
+  function commentGroup(c) {
+    if (isResolved(c)) return 'resolved';
+    const cur = session.revisions.length - 1;
+    return typeof c.revision === 'number' && c.revision < cur ? 'past' : 'current';
+  }
+
+  function groupToggleHtml() {
+    const label = resolvedOpen ? '解決済みのコメントを隠す' : '解決済みのコメントを表示';
+    return '<button class="icon-btn" data-group-toggle="resolved" title="' + label +
+      '" aria-label="' + label + '" aria-expanded="' + resolvedOpen + '">' +
+      HleIcons.html(resolvedOpen ? 'expand_less' : 'expand_more') + '</button>';
+  }
+
+  function groupsHtml(items, card, resolvedCard) {
+    const groups = { current: [], past: [], resolved: [] };
+    items.forEach((x) => groups[commentGroup(x.c)].push(x));
+    const headed = groups.past.length > 0 || groups.resolved.length > 0;
+    let html = groups.current.length || groups.past.length ? ''
+      : '<div class="empty-note">未解決のコメントはありません。</div>';
+    ['current', 'past', 'resolved'].forEach((name) => {
+      const arr = groups[name];
+      if (!arr.length) return;
+      const isRes = name === 'resolved';
+      const head = headed
+        ? '<h3 class="cmt-group-head"><span class="cmt-group-title">' +
+          GROUP_LABELS[name] + '</span><span class="cmt-group-count">' + arr.length +
+          '</span>' + (isRes ? groupToggleHtml() : '') + '</h3>'
+        : '';
+      const cards = isRes && !resolvedOpen ? ''
+        : arr.map((x) => (isRes ? resolvedCard : card)(x.c, x.n)).join('');
+      html += '<section class="cmt-group" data-group="' + name + '">' + head +
+        cards + '</section>';
+    });
+    return html;
+  }
+
+  function resolvedCardBody(c) {
+    const who = c.resolved_by === 'ai' ? 'AI' : 'あなた';
+    const replies = (c.replies || []).map((r) =>
+      '<div class="reply">' + authorLabel(r.author) +
+      '<span class="when">' + esc(fmtDate(r.created_at)) + '</span>' +
+      '<div class="body">' + esc(r.text) + '</div></div>').join('');
+    return tagBadge(c) + authorLabel(c.author) +
+      '<span class="when">' + esc(fmtDate(c.created_at)) + '</span>' +
+      '<div class="resolved-note"><span class="inline-ico">' +
+      HleIcons.html('check_circle') + '</span>' + who + 'が解決（' +
+      esc(fmtDate(c.resolved_at)) + '）</div>' +
+      '<div class="body">' + esc(c.text) + '</div>' + replies +
+      '<div class="card-actions"><button class="icon-btn" data-reopen="' +
+      esc(c.id) + '" title="未解決に戻す: 一覧に戻す（AIにも伝わる）" ' +
+      'aria-label="未解決に戻す">' + HleIcons.html('remove_done') + '</button></div>';
   }
 
   /* ---------- コメントの種類（指摘・質問。app.jsと同じ） ----------
@@ -786,6 +847,34 @@
       '</div>';
   }
 
+  /* 未解決のコメントのカード */
+  function cardHtml(c, n) {
+    const replies = (c.replies || []).map((r) =>
+      '<div class="reply">' + authorLabel(r.author) +
+      '<span class="when">' + esc(fmtDate(r.created_at)) + '</span>' +
+      editedMark(r) + bodyHtml(c.id, r.id, r) + '</div>'
+    ).join('');
+    return '<div class="comment-card' +
+      (c.id === activeCid ? ' active' : '') +
+      '" data-cid="' + esc(c.id) + '">' +
+      cardQuoteHtml(c, n) +
+      // 編集中は選択欄が種類を示すので、保存済みの種類のバッジは出さない
+      (isEditing(c.id, null) ? '' : tagBadge(c)) + authorLabel(c.author) +
+      '<span class="when">' + esc(fmtDate(c.created_at)) + '</span>' +
+      editedMark(c) + bodyHtml(c.id, null, c) +
+      replies + replyRowHtml(c.id) +
+      '</div>';
+  }
+
+  /* 解決済みのコメントのカード（app.jsと同じ）。読むだけにして、返信・編集・
+     削除の操作は出さない。押すとページの場所へ飛ぶ */
+  function resolvedCardHtml(c, n) {
+    return '<div class="comment-card resolved' +
+      (c.id === activeCid ? ' active' : '') +
+      '" data-cid="' + esc(c.id) + '">' +
+      cardQuoteHtml(c, n) + resolvedCardBody(c) + '</div>';
+  }
+
   function renderComments() {
     const list = $('#comment-list');
     if (!session.comments.length) {
@@ -795,37 +884,27 @@
         ' を押すと追加できます。</div>';
       return;
     }
-    // 番号は全コメントの通し番号を保ち、絞り込みで隠すものと解決済みの
-    // ものだけ描かない（解決しても、残ったカードの番号は変わらない）
+    // 番号は全コメントの通し番号を保ち、絞り込みで隠すものだけ描かない
+    // （解決しても、残ったカードの番号は変わらない）
     const visible = session.comments
       .map((c, i) => ({ c: c, n: i + 1 }))
-      .filter((x) => commentShown(x.c));
+      .filter((x) => commentVisible(x.c));
     if (!visible.length) {
-      list.innerHTML = session.comments.every(isResolved)
-        ? '<div class="empty-note">未解決のコメントはありません。</div>'
-        : '<div class="empty-note">この絞り込みに合う' +
-          'コメントはありません。</div>';
+      list.innerHTML = '<div class="empty-note">この絞り込みに合う' +
+        'コメントはありません。</div>';
       return;
     }
-    list.innerHTML = visible.map(({ c, n: cardNo }) => {
-      const i = cardNo - 1;
-      const replies = (c.replies || []).map((r) =>
-        '<div class="reply">' + authorLabel(r.author) +
-        '<span class="when">' + esc(fmtDate(r.created_at)) + '</span>' +
-        editedMark(r) + bodyHtml(c.id, r.id, r) + '</div>'
-      ).join('');
-      return '<div class="comment-card' +
-        (c.id === activeCid ? ' active' : '') +
-        '" data-cid="' + esc(c.id) + '">' +
-        cardQuoteHtml(c, i + 1) +
-        // 編集中は選択欄が種類を示すので、保存済みの種類のバッジは出さない
-        (isEditing(c.id, null) ? '' : tagBadge(c)) + authorLabel(c.author) +
-        '<span class="when">' + esc(fmtDate(c.created_at)) + '</span>' +
-        editedMark(c) + bodyHtml(c.id, null, c) +
-        replies + replyRowHtml(c.id) +
-        '</div>';
-    }).join('');
+    list.innerHTML = groupsHtml(visible, cardHtml, resolvedCardHtml);
     bindTagSelect(list);
+    list.querySelectorAll('button[data-reopen]').forEach((btn) => {
+      btn.addEventListener('click', () => resolveComment(btn.dataset.reopen, false));
+    });
+    list.querySelectorAll('button[data-group-toggle]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        resolvedOpen = !resolvedOpen;
+        renderComments();
+      });
+    });
     list.querySelectorAll('.comment-card').forEach((card) => {
       card.addEventListener('click', (e) => {
         // 種類の選択（label）を押してもページへは飛ばない
@@ -982,11 +1061,25 @@
     const doc = frameDoc();
     if (!c || !doc || !doc.body) return;
     if (c.target === 'image') {
+      // 解決済み・絞り込みで枠を描いていない画像・図も、場所が分かれば飛ぶ
+      const obj = elemFromRef(c.image_ref);
+      if (obj && obj.scrollIntoView) {
+        obj.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        return;
+      }
       toast('この画像・図は今のページで見つかりません');
       return;
     }
     const q = String(c.quote || '').trim();
     const idx = textIndex();
+    // ハイライトを描いていない（解決済み・絞り込みで隠れた）コメントは、
+    // まず引用文と文脈で元の位置を探し、見つかれば一時的に強調する
+    const whole = locate(idx, c);
+    const wr = whole && rangeFromOffsets(idx, whole.start, whole.end);
+    if (wr) {
+      showJump(wr);
+      return;
+    }
     const tries = [];
     [24, 12].forEach((n) => {
       if (q.length > n) {

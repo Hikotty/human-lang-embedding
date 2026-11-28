@@ -212,6 +212,10 @@ def test_resolve_comment_tool_by_ai(write_md):
     assert res["resolved"] is False and res["resolved_by"] == ""
     fb = json.loads(server.get_feedback(sid))
     assert [c["id"] for c in fb["comments"]] == ["c2"]
+    # 解決済みのものは別の一覧に、未解決に戻すときの id とともに並ぶ
+    assert [(c["id"], c["resolved_by"]) for c in fb["resolved_comments"]] \
+        == [("c1", "ai")]
+    assert "replies" not in fb["resolved_comments"][0]
 
 
 def test_resolve_comment_missing_raises(write_md):
@@ -227,6 +231,8 @@ def test_tool_descriptions_explain_resolving():
     assert "人間と同じ裁量" in rc and "resolved=False" in rc
     assert "get_feedback" in rc
     assert "resolve_comment" in d["get_feedback"]
+    assert "resolved_comments" in d["get_feedback"]
+    assert "resolved_comments" in rc
     assert "resolve_comment" in server.server.instructions
 
 

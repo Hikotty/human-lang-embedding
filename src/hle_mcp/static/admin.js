@@ -103,6 +103,24 @@
     }).join('');
   }
 
+  /* 解決済みのコメント。未解決のコメントとは別に、返信を除いて短く並べる */
+  function renderResolved(resolved, sid) {
+    if (!resolved || !resolved.length) return '';
+    return '<h4>解決済みのコメント (' + resolved.length + ')</h4>' +
+      resolved.map((c) => {
+        const who = c.author === 'ai'
+          ? '<span class="who ai">AI</span>'
+          : '<span class="who">人間</span>';
+        const by = c.resolved_by === 'ai' ? 'AI' : '人間';
+        return '<div class="admin-comment resolved">' +
+          '<div><b>C' + esc(c.number || '-') + '</b> ' + tagBadge(c) +
+          quoteHtml(c, sid) + '</div><div>' + who + esc(c.text) + '</div>' +
+          '<div class="meta">' + by + 'が解決（' + esc(fmtDate(c.resolved_at)) +
+          '）' + (c.reply_count ? '　返信' + c.reply_count + '件' : '') +
+          '</div></div>';
+      }).join('');
+  }
+
   function renderRevisions(detail) {
     return detail.revisions.map((rev, i) => {
       const isLast = i === detail.revisions.length - 1;
@@ -135,7 +153,8 @@
           '稿）' + (fb.source_path ? '　' + esc(fb.source_path) : '') +
           '</div>' +
           '<h4>コメント (' + fb.comments.length + ')</h4>' +
-          renderComments(fb.comments, sid);
+          renderComments(fb.comments, sid) +
+          renderResolved(fb.resolved_comments, sid);
         return;
       }
       const past = renderRevisions(session);
@@ -147,7 +166,8 @@
         '<h4>校正反映後のテキスト</h4>' +
         '<div class="annotated">' + esc(fb.result_text) + '</div>' +
         '<h4>コメント (' + fb.comments.length + ')</h4>' +
-        renderComments(fb.comments, sid);
+        renderComments(fb.comments, sid) +
+        renderResolved(fb.resolved_comments, sid);
     } catch (e) {
       container.innerHTML =
         '<div class="meta">読み込みに失敗しました: ' + esc(e.message) + '</div>';

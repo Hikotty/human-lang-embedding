@@ -455,6 +455,34 @@ def _open_numbers(
     return {cid: n for cid, n in numbers.items() if cid not in resolved}
 
 
+def _resolved_views(
+    session: dict[str, Any], numbers: dict[str, int]
+) -> list[dict[str, Any]]:
+    """解決済みのコメントを、comments とは別の一覧として短い形で返す。
+
+    反映も返信も要らないものなので、返信の本文は入れず件数だけにする
+    （コンテキストを増やさないため）。誰がいつ解決したかと、未解決に戻すときに
+    resolve_comment に渡す id を持つ。
+    """
+    return [
+        {
+            "number": numbers.get(c["id"]),
+            "id": c["id"],
+            "tag": c.get("tag", "issue"),
+            "revision": c.get("revision", 0),
+            "target": c.get("target", "text"),
+            "quote": c.get("quote", ""),
+            "text": c.get("text", ""),
+            "author": c.get("author", "human"),
+            "resolved_by": c.get("resolved_by", ""),
+            "resolved_at": c.get("resolved_at", ""),
+            "reply_count": len(c.get("replies", [])),
+        }
+        for c in session["comments"]
+        if _is_resolved(c)
+    ]
+
+
 def _comment_view(
     comment: dict[str, Any], number: int | None, anchored: bool = True
 ) -> dict[str, Any]:
@@ -539,6 +567,7 @@ def build_html_feedback(session: dict[str, Any]) -> dict[str, Any]:
         "revision_index": rev["index"],
         "source_path": session.get("source_path", ""),
         "comments": comments,
+        "resolved_comments": _resolved_views(session, comment_numbers),
         "note": (
             "HTMLレビューのため本文は含まれない。source_path のファイルを"
             "直接読み、各コメントの quote（選択テキスト）と prefix / suffix"
@@ -625,4 +654,5 @@ def build_feedback(session: dict[str, Any]) -> dict[str, Any]:
         "annotated_text": annotated,
         "changes": changes,
         "comments": comments,
+        "resolved_comments": _resolved_views(session, comment_numbers),
     }

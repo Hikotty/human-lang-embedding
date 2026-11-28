@@ -446,6 +446,34 @@ def test_resolved_comment_leaves_html_feedback():
     storage.set_comment_resolved(s["id"], "c2", True, by="ai")
     fb = feedback.build_feedback(storage.load_session(s["id"]))
     assert [(c["id"], c["number"]) for c in fb["comments"]] == [("c1", 1)]
+    assert [(c["id"], c["number"], c["resolved_by"])
+            for c in fb["resolved_comments"]] == [("c2", 2, "ai")]
+
+
+def test_resolved_comments_are_listed_separately_and_short():
+    """解決済みは resolved_comments に、返信の本文を除いた短い形で並ぶ。"""
+    s = storage.create_session("赤い空と青い海。", "解決一覧", "/tmp/x")
+    storage.add_comment(s["id"], quote="赤", text="一つ目", comment_id="c1")
+    storage.add_comment(s["id"], quote="青", text="なぜ？", comment_id="c2",
+                        tag="question")
+    storage.add_reply(s["id"], "c2", "理由はこうです", author="ai")
+    storage.add_reply(s["id"], "c2", "納得しました", author="human")
+    storage.add_revision(s["id"], "赤い空と青い海と白い雲。")
+    storage.add_comment(s["id"], quote="白", text="三つ目", comment_id="c3")
+    fb = feedback.build_feedback(storage.load_session(s["id"]))
+    assert fb["resolved_comments"] == []
+    storage.set_comment_resolved(s["id"], "c2", True, by="human")
+    fb = feedback.build_feedback(storage.load_session(s["id"]))
+    # 過去の稿の未解決（c1）は comments に残り、revision で見分けられる
+    assert [(c["id"], c["revision"]) for c in fb["comments"]] \
+        == [("c1", 0), ("c3", 1)]
+    [r] = fb["resolved_comments"]
+    assert r == {
+        "number": 2, "id": "c2", "tag": "question", "revision": 0,
+        "target": "text", "quote": "青", "text": "なぜ？", "author": "human",
+        "resolved_by": "human", "resolved_at": r["resolved_at"], "reply_count": 2,
+    }
+    assert r["resolved_at"]
 
 
 # ---------- マーカー記号のエスケープ ----------

@@ -53,7 +53,7 @@ server = MCPServer(
         "人間への質問は reply_comment で答える（質問を理由に本文は変えない）。"
         "もう人間もAIも扱わなくてよいコメントは、人間は画面で、AIは"
         "resolve_comment で、同じ扱いの解決済みにでき、解決済みは get_feedback の"
-        "comments から外れる。"
+        "comments から外れて resolved_comments に別に並ぶ。"
         "一連の添削が終わったら、受けた指摘の傾向を整理してskills"
         "（エージェントのスキル定義）へ反映することを人間に提案する。"
     ),
@@ -343,7 +343,12 @@ def get_feedback(
     決めたもので、反映も返信も要らない。番号は解決したコメントの分を欠番に
     して振るので、残ったコメントの番号は解決の前後で変わらない。そのスレッドで
     人間も AI ももう何もしなくてよいと判断したら、AI も resolve_comment で
-    解決済みにできる。
+    解決済みにできる。解決済みのコメントは resolved_comments に別の一覧として
+    並ぶ（返信の本文は含めず reply_count だけ。resolved_by と resolved_at が
+    誰がいつ解決したか）。未解決に戻すときは、その id を resolve_comment に
+    resolved=False で渡す。comments のうち revision が revision_index より
+    小さいものは、前の稿に付いた（過去の）未解決のコメントで、画面でも
+    今の稿へのコメントとは分けて一覧される。
 
     人間が書き足した部分の意図が読み取れない・誤りに見えるが黙って直すべき
     でないときは、チャットに書くのではなく add_comment でその箇所に質問
@@ -708,7 +713,8 @@ def resolve_comment(
     解決済みのコメントは画面のコメント一覧から外れて本文のハイライトも消え、
     get_feedback の comments と annotated_text の〖Cn〗にも出なくなる。番号は
     振り直さないので、残ったコメントの番号は変わらない。コメント本体と返信は
-    消えない。
+    消えず、画面では過去の稿のコメントとは別の「解決済み」の一覧に、
+    get_feedback では resolved_comments に並ぶ。人間はそこから未解決に戻せる。
 
     Args:
         session_id: セッションID
