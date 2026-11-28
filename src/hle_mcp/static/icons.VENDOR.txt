@@ -13,6 +13,7 @@ style.css の画像コメントの印（comment）も、同じ path を data: UR
   add_comment            d40126f783aaaf80dfe074fba3cd26b4455332612307cff0268c778a5154d667
   add_photo_alternate    91235a2bf9aa016aad4036bca72e994584a913cdaf2dec57535263f6c4c02c11
   check                  01edd53418816632be08e9565b8ca40d9028c230a8a67baaf4b8a1de20db00e6
+  check_circle           42bf0950bc12ecf7952a8c3be86e0131f225095a7dc6c824a659a13df442e373
   close                  a82592b0faa0b104a4d4b0530bb05c6a4bfed5728f5aad03ae8e7a19f32b5511
   comment                ab90eadc058cbf6ab37cb705c2f9b90ec7f42c3859d8cf6245bdede813090924
   dark_mode              b45f29f9b3268bb674a00c025b619292e36a86e6dc6b28851f954763d943eca7

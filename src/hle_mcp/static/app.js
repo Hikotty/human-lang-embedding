@@ -125,11 +125,15 @@
     $('#editor').addEventListener('click', (e) => {
       clearJumpHighlight();
       if (!e.target.closest) return;
-      const span = e.target.closest('.cmt');
+      // 絞り込みや解決で隠れたハイライトは、押してもカードを開かない
+      const span = e.target.closest('.cmt:not(.cmt-filtered)');
       if (span) { activateComment(span.dataset.cid, false); return; }
       // コメント付きの画像をクリックしたら対応するカードを開く
       const p = e.target.closest('.img-para[data-cids]');
-      const cid = p ? (p.dataset.cids || '').split(/\s+/)[0] : '';
+      const cid = p ? (p.dataset.cids || '').split(/\s+/).find((id) => {
+        const c = session.comments.find((x) => x.id === id);
+        return !!c && commentShown(c);
+      }) : '';
       if (cid) activateComment(cid, false);
     });
     setInterval(pollRemote, 2500);
@@ -573,12 +577,41 @@
     return author === commentFilter;
   }
 
+  /* ---------- コメントの解決（完了済み） ----------
+     人間はカードのボタンで、AIは MCP の resolve_comment で、同じ扱いの
+     「解決済み」を付ける。解決済みのコメントは一覧から外し、本文の
+     ハイライトも消す（span.cmt は残すので、未解決に戻せば元に戻る） */
+  function isResolved(c) {
+    return !!(c && c.resolved_at);
+  }
+
+  /* 一覧に出し、本文にハイライトを付けるコメントか */
+  function commentShown(c) {
+    return !isResolved(c) && commentVisible(c);
+  }
+
+  async function resolveComment(cid, resolved) {
+    try {
+      const updated = await api('/api/sessions/' + sid + '/comments/' +
+        cid + '/resolve', 'POST', { resolved: resolved });
+      const i = session.comments.findIndex((x) => x.id === cid);
+      // 未解決に戻すとサーバーは resolved_* のキーを消すので、置き換える
+      if (i >= 0) session.comments[i] = updated;
+      if (resolved && activeCid === cid) activeCid = null;
+      if (editing && editing.cid === cid) editing = null;
+      renderComments();
+    } catch (e) {
+      alert('解決済みにできませんでした: ' + e.message);
+    }
+  }
+
   /* 隠れているコメントは本文のハイライト（span.cmt・画像段落）も消す。
-     DOMのcmt構造は壊さず、class の付け外しだけで見た目を戻す */
+     DOMのcmt構造は壊さず、class の付け外しだけで見た目を戻す。
+     絞り込みで隠れたものと、解決済みのものが対象 */
   function applyCommentFilterToBody() {
     const hidden = new Set();
     (session && session.comments ? session.comments : []).forEach((c) => {
-      if (!commentVisible(c)) hidden.add(c.id);
+      if (!commentShown(c)) hidden.add(c.id);
     });
     document.querySelectorAll('#editor .cmt[data-cid]').forEach((span) => {
       span.classList.toggle('cmt-filtered', hidden.has(span.dataset.cid));
@@ -745,11 +778,19 @@
       revNote(c) + esc(c.quote) + '</div>';
   }
 
+  /* スレッドを解決済みにするボタン（コメント本体にだけ付け、返信には無い） */
+  function resolveBtnHtml(cid) {
+    return '<button class="icon-btn" data-resolve="' + esc(cid) + '" ' +
+      'title="解決済みにする: 一覧から外す（AIにも完了として伝わる）" ' +
+      'aria-label="解決済みにする">' + HleIcons.html('check_circle') + '</button>';
+  }
+
   function bodyHtml(cid, rid, o) {
     if (isEditing(cid, rid)) return editFormHtml(cid, rid, o.text, tagOf(o));
     const key = targetKey(cid, rid);
     return '<div class="body">' + esc(o.text) + '</div>' +
       '<div class="card-actions">' +
+      (rid ? '' : resolveBtnHtml(cid)) +
       '<button class="icon-btn" data-edit="' + key + '" title="編集" aria-label="編集">' +
       HleIcons.html('edit') + '</button>' +
       '<button class="icon-btn danger" data-del="' + key + '" title="削除" ' +
@@ -781,13 +822,16 @@
       applyCommentFilterToBody();
       return;
     }
-    // 番号は全コメントの通し番号を保ち、絞り込みで隠すものだけ描かない
+    // 番号は全コメントの通し番号を保ち、絞り込みで隠すものと解決済みの
+    // ものだけ描かない（解決しても、残ったカードの番号は変わらない）
     const visible = session.comments
       .map((c, i) => ({ c: c, n: i + 1 }))
-      .filter((x) => commentVisible(x.c));
+      .filter((x) => commentShown(x.c));
     if (!visible.length) {
-      list.innerHTML = '<div class="empty-note">この絞り込みに合う' +
-        'コメントはありません。</div>';
+      list.innerHTML = session.comments.every(isResolved)
+        ? '<div class="empty-note">未解決のコメントはありません。</div>'
+        : '<div class="empty-note">この絞り込みに合う' +
+          'コメントはありません。</div>';
       applyCommentFilterToBody();
       return;
     }
@@ -827,6 +871,9 @@
           sendReply(ta.dataset.reply);
         }
       });
+    });
+    list.querySelectorAll('button[data-resolve]').forEach((btn) => {
+      btn.addEventListener('click', () => resolveComment(btn.dataset.resolve, true));
     });
     list.querySelectorAll('button[data-edit]').forEach((btn) => {
       btn.addEventListener('click', () => startEdit(btn.dataset.edit));

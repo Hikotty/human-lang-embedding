@@ -160,6 +160,7 @@ def test_tools_registered_on_mcp_server():
     assert names >= {
         "open_review", "get_feedback", "submit_revision",
         "reply_comment", "list_reviews", "get_review", "add_comment",
+        "resolve_comment",
     }
 
 
@@ -191,6 +192,42 @@ def test_tool_descriptions_explain_question_tag():
     assert 'tag="question"' in d["reply_comment"]
     # ツールを呼ぶ前から見える instructions にも同じ扱いを書いてある
     assert 'tag="question"' in server.server.instructions
+
+
+def test_resolve_comment_tool_by_ai(write_md):
+    """AIも人間と同じ解決済みを付け外しでき、get_feedback の comments から外れる。"""
+    out = json.loads(server.open_review(write_md("初稿です。"), "解決"))
+    sid = out["session_id"]
+    storage.add_comment(sid, "初稿", "直して", comment_id="c1")
+    storage.add_comment(sid, "初稿", "なぜ？", comment_id="c2", tag="question")
+    res = json.loads(server.resolve_comment(sid, "c1"))
+    assert res["ok"] is True and res["resolved"] is True
+    assert res["resolved_by"] == "ai" and res["resolved_at"]
+    fb = json.loads(server.get_feedback(sid))
+    assert [(c["id"], c["number"]) for c in fb["comments"]] == [("c2", 2)]
+    # 人間が解決したものを AI が未解決に戻すこともできる
+    storage.set_comment_resolved(sid, "c2", True, by="human")
+    assert json.loads(server.get_feedback(sid))["comments"] == []
+    res = json.loads(server.resolve_comment(sid, "c2", resolved=False))
+    assert res["resolved"] is False and res["resolved_by"] == ""
+    fb = json.loads(server.get_feedback(sid))
+    assert [c["id"] for c in fb["comments"]] == ["c2"]
+
+
+def test_resolve_comment_missing_raises(write_md):
+    out = json.loads(server.open_review(write_md("初稿です。"), "解決"))
+    with pytest.raises(KeyError):
+        server.resolve_comment(out["session_id"], "nope")
+
+
+def test_tool_descriptions_explain_resolving():
+    """解決済みは人間と同じ扱いで、get_feedback から外れることが説明にある。"""
+    d = _tool_descriptions()
+    rc = d["resolve_comment"]
+    assert "人間と同じ裁量" in rc and "resolved=False" in rc
+    assert "get_feedback" in rc
+    assert "resolve_comment" in d["get_feedback"]
+    assert "resolve_comment" in server.server.instructions
 
 
 def test_get_feedback_reports_comment_tags(write_md):

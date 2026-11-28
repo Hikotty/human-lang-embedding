@@ -293,6 +293,44 @@ def test_deleting_comment_renumbers_remaining(web_port):
         == [(1, "2つ目"), (2, "3つ目")]
 
 
+def test_comment_resolve_endpoint(web_port):
+    """画面からの解決は人間の解決として記録され、feedback の comments から外れる。"""
+    s = storage.create_session("t", "d", "")
+    for cid in ("c1", "c2"):
+        _post(web_port, f"/api/sessions/{s['id']}/comments",
+              {"id": cid, "quote": "", "text": cid})
+    status, c = _post(web_port, f"/api/sessions/{s['id']}/comments/c1/resolve",
+                      {"resolved": True})
+    assert status == 200
+    assert c["resolved_by"] == "human" and c["resolved_at"]
+    _, fb = _get(web_port, f"/api/sessions/{s['id']}/feedback")
+    assert [(x["id"], x["number"]) for x in fb["comments"]] == [("c2", 2)]
+    # 画面のポーリングが読むセッションには解決済みも残る
+    _, detail = _get(web_port, f"/api/sessions/{s['id']}")
+    assert [x["id"] for x in detail["comments"]] == ["c1", "c2"]
+    _, c = _post(web_port, f"/api/sessions/{s['id']}/comments/c1/resolve",
+                 {"resolved": False})
+    assert "resolved_at" not in c and "resolved_by" not in c
+    _, fb = _get(web_port, f"/api/sessions/{s['id']}/feedback")
+    assert [x["id"] for x in fb["comments"]] == ["c1", "c2"]
+
+
+def test_comment_resolve_endpoint_errors(web_port):
+    s = storage.create_session("t", "d", "")
+    _post(web_port, f"/api/sessions/{s['id']}/comments",
+          {"id": "c1", "quote": "", "text": "x"})
+    base = f"/api/sessions/{s['id']}/comments"
+    # resolved は真偽値で明示する（無い・文字列は 400）
+    assert _status_of(lambda: _post(web_port, base + "/c1/resolve", {})) == 400
+    assert _status_of(lambda: _post(
+        web_port, base + "/c1/resolve", {"resolved": "yes"})) == 400
+    assert _status_of(lambda: _post(
+        web_port, base + "/nope/resolve", {"resolved": True})) == 404
+    assert _status_of(lambda: _post(
+        web_port, "/api/sessions/nosession/comments/c1/resolve",
+        {"resolved": True})) == 404
+
+
 def test_post_to_missing_session_404(web_port):
     code = _status_of(lambda: _post(
         web_port, "/api/sessions/nosession/document", {"html": "<p>x</p>"}))

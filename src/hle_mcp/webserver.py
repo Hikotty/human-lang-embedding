@@ -728,6 +728,11 @@ class _Handler(BaseHTTPRequestHandler):
         elif parts[3] == "comments" and len(parts) == 6 and parts[5] == "delete":
             storage.delete_comment(sid, parts[4])
             self._send_json({"ok": True})
+        elif parts[3] == "comments" and len(parts) == 6 and parts[5] == "resolve":
+            # 画面からの操作は人間の解決として記録する（AIは MCP の resolve_comment）
+            comment = storage.set_comment_resolved(
+                sid, parts[4], body.get("resolved"), by="human")
+            self._send_json(comment)
         elif parts[3] == "comments" and len(parts) == 8 \
                 and parts[5] == "replies" and parts[7] == "update":
             reply = storage.update_reply(

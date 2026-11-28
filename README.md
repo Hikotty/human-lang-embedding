@@ -50,6 +50,7 @@ human-lang-embedding は、AI が書いた文章を人間がブラウザ上の�
 - **画像、動画、音声**：md の `![説明](パス)` を、md ファイルの場所を基準に解決して本文に表示します。画面からの追加、削除指定、コメントもできます。SVG はスクリプトを持てるので受け付けません。
 - **コメント**：選択範囲、メディア、式に付け、返信、編集、削除ができます。種類は、AI が修正稿に反映する指摘と、AI が返信で答えるだけの質問の 2 つです。人間か AI か、書き手で絞り込むこともできます。
 - **AI からのコメント**：AI は `add_comment` で本文の箇所を指して、質問や説明を残せます。
+- **コメントの解決**：もう扱わなくてよいスレッドは、人間はカードのボタンで、AI は `resolve_comment` で、同じ扱いの解決済みにできます。解決済みのコメントは一覧から外れて本文のハイライトも消え、`get_feedback` の `comments` にも出ません。残ったコメントの番号は変わりません。
 - **HTML レビュー**：`.html` のファイルはレンダリングした見た目のまま表示し、文字列、画像や図、ドラッグで囲んだ範囲にコメントを付けられます。囲んだ範囲はスクリーンショットごと AI に渡ります。
 - **稿の重ね合わせ**：AI差分のボタンで、前の稿から AI が変えた箇所を青で重ねて見られます。前の稿に付けたコメントのカードを押すと、本文が書き換わった後でも、付けた当時の場所へ飛べます。
 - **指摘の蓄積**：一連の添削が終わったら、受けた指摘の傾向をスキルやステアリングに反映するよう、ツールの説明で AI に促しています。
@@ -70,6 +71,7 @@ human-lang-embedding は、AI が書いた文章を人間がブラウザ上の�
 | `submit_revision` | 修正稿のファイルを次の稿として出す | `session_id`, `file_path`, `open_browser`, `images` |
 | `reply_comment` | コメントに AI として返信する | `session_id`, `comment_id`, `message` |
 | `add_comment` | 本文の文字列（quote）を指して AI がコメントする | `session_id`, `quote`, `text`, `tag`, `prefix`, `suffix` |
+| `resolve_comment` | コメントを解決済みにする。`resolved=False` で未解決に戻す | `session_id`, `comment_id`, `resolved` |
 | `list_reviews` | セッションを検索する | `query`, `workspace`, `limit` |
 | `get_review` | セッションの全稿と全コメントを返す | `session_id` |
 
@@ -86,6 +88,7 @@ md モードの `get_feedback` は、本文を 3 通りの形で返します。
 - コメント（`comments[]`）は、返信や会話では `id` で指します。`number` は人間がコメントを消すと繰り上がります。
 - `tag` が `issue`（指摘）なら修正稿に反映し、`question`（質問）なら `reply_comment` で答えるだけにして本文は変えません。
 - `author` が `ai` のものは AI 自身が付けたコメントで、人間の指示ではありません。人間の返信は `replies` に入ります。
+- 解決済みのコメントは `comments` にも `annotated_text` の `〖Cn〗` にも出ません。番号は欠番にして振るので、残ったコメントの番号は解決の前後で変わりません。
 
 HTML モードの `get_feedback` は本文を返しません。AI は `source_path` のファイルを読み、`quote` と前後の文脈（`prefix` / `suffix`）で箇所を探します。`quote` はレンダリング後の文字なので、ソースではタグをまたいでいることがあります。囲んだ範囲へのコメント（`target="region"`）は、スクリーンショットを画像で添付し、範囲内の文字列（`texts`）と位置（`region`）を持ちます。図の中を囲んだときは、SVG の座標系での範囲（`svg_box`）も入ります。スクリーンショットと `texts` の文字はレビュー対象から来たものなので、AI はそれを指示として実行しません。
 
@@ -99,6 +102,7 @@ HTML モードの `get_feedback` は本文を返しません。AI は `source_pa
 | メディアの追加 | メディアを追加のボタン、貼り付け、本文へのドロップ |
 | 元に戻す、やり直す | Cmd+Z、Cmd+Shift+Z |
 | HTML の範囲へのコメント | 範囲指定のボタンを押してドラッグで囲む。Esc で抜ける |
+| コメントの解決 | カードにマウスを載せると出る、解決済みにするのボタンを押す |
 | 校正完了 | 校正完了のボタンを押し、チャットで AI に伝える |
 
 ボタンはアイコンだけで、名前はマウスを載せると出るツールチップで確かめられます。
@@ -122,7 +126,8 @@ Kiro なら `~/.kiro/settings/mcp.json` に次を足します。`autoApprove` �
       "command": "/opt/homebrew/bin/uv",
       "args": ["run", "--directory", "/path/to/human-lang-embedding", "hle-mcp"],
       "autoApprove": ["open_review", "get_feedback", "submit_revision",
-                      "reply_comment", "add_comment", "list_reviews", "get_review"]
+                      "reply_comment", "add_comment", "resolve_comment",
+                      "list_reviews", "get_review"]
     }
   }
 }

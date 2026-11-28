@@ -413,6 +413,41 @@ def test_legacy_comment_without_author_defaults_human():
     assert "anchored" not in v
 
 
+# ---------- 解決済み（完了済み）のコメント ----------
+
+def test_resolved_comment_leaves_comments_and_markers():
+    """解決済みは comments と〖Cn〗から外れ、残りの番号は変わらない。"""
+    s = storage.create_session("赤い空と青い海。", "解決", "/tmp/x")
+    storage.add_comment(s["id"], quote="赤", text="一つ目", comment_id="c1")
+    storage.add_comment(s["id"], quote="青", text="二つ目", comment_id="c2")
+    storage.set_document(
+        s["id"],
+        '<p><span class="cmt" data-cid="c1">赤</span>い空と'
+        '<span class="cmt" data-cid="c2">青</span>い海。</p>')
+    before = feedback.build_feedback(storage.load_session(s["id"]))
+    assert "〖C1〗赤〖/C1〗" in before["annotated_text"]
+    storage.set_comment_resolved(s["id"], "c1", True, by="human")
+    fb = feedback.build_feedback(storage.load_session(s["id"]))
+    assert [(c["id"], c["number"]) for c in fb["comments"]] == [("c2", 2)]
+    assert fb["annotated_text"] == "赤い空と〖C2〗青〖/C2〗い海。"
+    # 本文（result_text）はコメントの解決で変わらない
+    assert fb["result_text"] == before["result_text"]
+    # 未解決に戻せば元どおり
+    storage.set_comment_resolved(s["id"], "c1", False, by="ai")
+    again = feedback.build_feedback(storage.load_session(s["id"]))
+    assert again["annotated_text"] == before["annotated_text"]
+    assert [c["id"] for c in again["comments"]] == ["c1", "c2"]
+
+
+def test_resolved_comment_leaves_html_feedback():
+    s = storage.create_session("<p>本文</p>", "HTML解決", "/tmp/x", mode="html")
+    storage.add_comment(s["id"], quote="本文", text="一つ目", comment_id="c1")
+    storage.add_comment(s["id"], quote="本文", text="二つ目", comment_id="c2")
+    storage.set_comment_resolved(s["id"], "c2", True, by="ai")
+    fb = feedback.build_feedback(storage.load_session(s["id"]))
+    assert [(c["id"], c["number"]) for c in fb["comments"]] == [("c1", 1)]
+
+
 # ---------- マーカー記号のエスケープ ----------
 def test_escape_markers_roundtrip():
     """【】〖〗と \\ を可逆にエスケープする。"""

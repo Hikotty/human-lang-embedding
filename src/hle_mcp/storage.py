@@ -662,6 +662,44 @@ def delete_comment(session_id: str, comment_id: str) -> dict[str, Any]:
         return s
 
 
+# コメントの解決（完了済み）。人間（画面）と AI（MCP の resolve_comment）が
+# 同じ扱いで付け外しでき、どちらが付けたコメントもどちらからでも解決できる。
+# 解決したコメントは resolved_at（日時）と resolved_by（human / ai）を持ち、
+# 画面の一覧と get_feedback の comments から外れる。未解決ではキーを持たない
+RESOLVERS = ("human", "ai")
+
+
+def is_resolved(comment: dict[str, Any]) -> bool:
+    """コメントが解決済み（完了済み）か。"""
+    return bool(comment.get("resolved_at"))
+
+
+def set_comment_resolved(
+    session_id: str, comment_id: str, resolved: bool, by: str
+) -> dict[str, Any]:
+    """コメントを解決済みにする。resolved=False で未解決に戻す。
+
+    by は操作した側（"human" / "ai"）。解決済みのものをもう一度解決しても、
+    最初に解決した記録（誰が・いつ）は変えない。コメント本体と返信は残す。
+    """
+    if not isinstance(resolved, bool):
+        raise ValueError("resolved には true か false を指定してください")
+    if by not in RESOLVERS:
+        raise ValueError(f"不正な操作者: {by!r} (対応: human, ai)")
+    with _LOCK:
+        s = load_session(session_id)
+        comment = find_comment(s, comment_id)  # 存在しなければ KeyError
+        if resolved and not is_resolved(comment):
+            comment["resolved_at"] = _now()
+            comment["resolved_by"] = by
+            save_session(s)
+        elif not resolved and is_resolved(comment):
+            comment.pop("resolved_at", None)
+            comment.pop("resolved_by", None)
+            save_session(s)
+        return comment
+
+
 def find_reply(comment: dict[str, Any], reply_id: str) -> dict[str, Any]:
     for r in comment.get("replies", []):
         if r["id"] == reply_id:

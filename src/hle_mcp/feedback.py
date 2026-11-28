@@ -437,6 +437,24 @@ def _comment_numbers(
     return numbers
 
 
+def _is_resolved(comment: dict[str, Any]) -> bool:
+    """解決済み（完了済み）のコメントか。storage.is_resolved と同じ判定。
+
+    解決済みのコメントは、人間か AI がもう扱わなくてよいと決めたもので、
+    comments と注釈の〖Cn〗から外す。番号は外さずに振るので、残ったコメントの
+    番号は解決の前後で変わらず、画面のカードの番号とも揃う。
+    """
+    return bool(comment.get("resolved_at"))
+
+
+def _open_numbers(
+    session: dict[str, Any], numbers: dict[str, int]
+) -> dict[str, int]:
+    """番号の対応から、解決済みのコメントを除いたもの（注釈に使う）。"""
+    resolved = {c["id"] for c in session["comments"] if _is_resolved(c)}
+    return {cid: n for cid, n in numbers.items() if cid not in resolved}
+
+
 def _comment_view(
     comment: dict[str, Any], number: int | None, anchored: bool = True
 ) -> dict[str, Any]:
@@ -505,6 +523,8 @@ def build_html_feedback(session: dict[str, Any]) -> dict[str, Any]:
     comment_numbers = _comment_numbers(session, anchored_cids)
     comments = []
     for c in session["comments"]:
+        if _is_resolved(c):
+            continue
         anchored = _is_anchored(c, anchored_cids)
         view = _comment_view(c, comment_numbers.get(c["id"]), anchored)
         view["prefix"] = c.get("prefix", "")
@@ -576,7 +596,8 @@ def build_feedback(session: dict[str, Any]) -> dict[str, Any]:
         comment_numbers = _comment_numbers(session, anchored_cids)
         original = compose_original(paragraphs)
         result = compose_result(paragraphs)
-        annotated = compose_annotated(paragraphs, comment_numbers)
+        annotated = compose_annotated(
+            paragraphs, _open_numbers(session, comment_numbers))
         changes = compose_changes(paragraphs)
     else:
         anchored_cids = set()
@@ -589,6 +610,7 @@ def build_feedback(session: dict[str, Any]) -> dict[str, Any]:
         _comment_view(c, comment_numbers.get(c["id"]),
                       _is_anchored(c, anchored_cids))
         for c in session["comments"]
+        if not _is_resolved(c)
     ]
     return {
         "session_id": session["id"],

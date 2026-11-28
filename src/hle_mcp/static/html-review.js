@@ -298,8 +298,8 @@
     if (!doc || !doc.body) return;
     const idx = textIndex();
     session.comments.forEach((c) => {
-      // 絞り込みで隠れているコメントはハイライトも描かない
-      if (!commentVisible(c)) return;
+      // 絞り込みで隠れているコメントと解決済みのコメントはハイライトも描かない
+      if (!commentShown(c)) return;
       // 範囲コメントの quote は範囲内の文字列をつないだ見出しなので、
       // 本文から探さない（位置は region で持つ）
       if (c.target === 'region') return;
@@ -619,6 +619,35 @@
     return author === commentFilter;
   }
 
+  /* ---------- コメントの解決（完了済み。app.jsと同じ） ----------
+     人間はカードのボタンで、AIは MCP の resolve_comment で、同じ扱いの
+     「解決済み」を付ける。解決済みは一覧から外し、ページのハイライト・
+     画像や図の枠・範囲の枠も描かない */
+  function isResolved(c) {
+    return !!(c && c.resolved_at);
+  }
+
+  /* 一覧に出し、ページにハイライトや枠を描くコメントか */
+  function commentShown(c) {
+    return !isResolved(c) && commentVisible(c);
+  }
+
+  async function resolveComment(cid, resolved) {
+    try {
+      const updated = await api('/api/sessions/' + sid + '/comments/' +
+        cid + '/resolve', 'POST', { resolved: resolved });
+      const i = session.comments.findIndex((x) => x.id === cid);
+      // 未解決に戻すとサーバーは resolved_* のキーを消すので、置き換える
+      if (i >= 0) session.comments[i] = updated;
+      if (resolved && activeCid === cid) activeCid = null;
+      if (editing && editing.cid === cid) editing = null;
+      renderComments();
+      applyHighlights();
+    } catch (e) {
+      alert('解決済みにできませんでした: ' + e.message);
+    }
+  }
+
   /* ---------- コメントの種類（指摘・質問。app.jsと同じ） ----------
      指摘は本文を直してほしいもの、質問は答えてほしいだけのもの */
   const TAG_LABELS = { issue: '指摘', question: '質問' };
@@ -694,11 +723,19 @@
       'aria-label="キャンセル">' + HleIcons.html('close') + '</button></div>';
   }
 
+  /* スレッドを解決済みにするボタン（コメント本体にだけ付け、返信には無い） */
+  function resolveBtnHtml(cid) {
+    return '<button class="icon-btn" data-resolve="' + esc(cid) + '" ' +
+      'title="解決済みにする: 一覧から外す（AIにも完了として伝わる）" ' +
+      'aria-label="解決済みにする">' + HleIcons.html('check_circle') + '</button>';
+  }
+
   function bodyHtml(cid, rid, o) {
     if (isEditing(cid, rid)) return editFormHtml(cid, rid, o.text, tagOf(o));
     const key = targetKey(cid, rid);
     return '<div class="body">' + esc(o.text) + '</div>' +
       '<div class="card-actions">' +
+      (rid ? '' : resolveBtnHtml(cid)) +
       '<button class="icon-btn" data-edit="' + key + '" title="編集" aria-label="編集">' +
       HleIcons.html('edit') + '</button>' +
       '<button class="icon-btn danger" data-del="' + key + '" title="削除" ' +
@@ -758,13 +795,16 @@
         ' を押すと追加できます。</div>';
       return;
     }
-    // 番号は全コメントの通し番号を保ち、絞り込みで隠すものだけ描かない
+    // 番号は全コメントの通し番号を保ち、絞り込みで隠すものと解決済みの
+    // ものだけ描かない（解決しても、残ったカードの番号は変わらない）
     const visible = session.comments
       .map((c, i) => ({ c: c, n: i + 1 }))
-      .filter((x) => commentVisible(x.c));
+      .filter((x) => commentShown(x.c));
     if (!visible.length) {
-      list.innerHTML = '<div class="empty-note">この絞り込みに合う' +
-        'コメントはありません。</div>';
+      list.innerHTML = session.comments.every(isResolved)
+        ? '<div class="empty-note">未解決のコメントはありません。</div>'
+        : '<div class="empty-note">この絞り込みに合う' +
+          'コメントはありません。</div>';
       return;
     }
     list.innerHTML = visible.map(({ c, n: cardNo }) => {
@@ -803,6 +843,9 @@
           sendReply(ta.dataset.reply);
         }
       });
+    });
+    list.querySelectorAll('button[data-resolve]').forEach((btn) => {
+      btn.addEventListener('click', () => resolveComment(btn.dataset.resolve, true));
     });
     list.querySelectorAll('button[data-edit]').forEach((btn) => {
       btn.addEventListener('click', () => startEdit(btn.dataset.edit));
@@ -1514,8 +1557,8 @@
     const cur = session.revisions.length - 1;
     session.comments.forEach((c, i) => {
       if (c.target !== 'region') return;
-      // 絞り込みで隠れている範囲コメントは枠も描かない
-      if (!commentVisible(c)) return;
+      // 絞り込みで隠れている範囲コメントと解決済みのものは枠も描かない
+      if (!commentShown(c)) return;
       const r = regionClientRect(c.region);
       if (!r) return;
       // 前の稿で囲んだ範囲は、今の稿では図が書き換わっていることがある。
@@ -1570,7 +1613,8 @@
   function regionAt(x, y) {
     let found = null;
     session.comments.forEach((c) => {
-      if (c.target !== 'region') return;
+      // 枠を描いていない（隠れた・解決済みの）範囲は、押しても開かない
+      if (c.target !== 'region' || !commentShown(c)) return;
       const r = regionClientRect(c.region);
       if (r && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
         found = c.id;

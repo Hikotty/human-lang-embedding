@@ -11,7 +11,9 @@ AIが生成した文章を人間がブラウザ上のトラックチェンジエ
 4. AIが修正稿のmdファイルを submit_revision で再提示（複数ラリー可）
 5. 必要に応じて reply_comment でコメントスレッドに返信。コメントには種類が
    あり、指摘（tag="issue"、既定）は修正稿に反映し、質問（tag="question"）は
-   reply_comment で答えるだけで本文は変えない（ツール説明にも書いてある）
+   reply_comment で答えるだけで本文は変えない（ツール説明にも書いてある）。
+   もう扱わなくてよいスレッドは、人間は画面で、AIは resolve_comment で
+   解決済みにでき、一覧と get_feedback の comments から外れる
 6. 一連の添削が終わったら、受けた指摘の傾向を整理して skills へ反映する
    （同じ校正を次も人間にさせないための蓄積。ツール説明にも書いてある）
 """
@@ -49,6 +51,9 @@ server = MCPServer(
         "（author=\"human\"）で受け取る。comments[] の author が \"ai\" の"
         "ものはAI自身が付けたコメントで、人間からの修正指示ではない。"
         "人間への質問は reply_comment で答える（質問を理由に本文は変えない）。"
+        "もう人間もAIも扱わなくてよいコメントは、人間は画面で、AIは"
+        "resolve_comment で、同じ扱いの解決済みにでき、解決済みは get_feedback の"
+        "comments から外れる。"
         "一連の添削が終わったら、受けた指摘の傾向を整理してskills"
         "（エージェントのスキル定義）へ反映することを人間に提案する。"
     ),
@@ -332,6 +337,13 @@ def get_feedback(
     コメントはまだ本文に結び付いておらず anchored=false・番号なしで quote
     だけを持つ。人間が画面を開くと本文の該当箇所に結び付き、以降は番号と
     〖Cn〗が付く。
+
+    解決済み（完了済み）のコメントは comments にも annotated_text の〖Cn〗にも
+    出ない。人間が画面で、または AI が resolve_comment で、もう扱わなくてよいと
+    決めたもので、反映も返信も要らない。番号は解決したコメントの分を欠番に
+    して振るので、残ったコメントの番号は解決の前後で変わらない。そのスレッドで
+    人間も AI ももう何もしなくてよいと判断したら、AI も resolve_comment で
+    解決済みにできる。
 
     人間が書き足した部分の意図が読み取れない・誤りに見えるが黙って直すべき
     でないときは、チャットに書くのではなく add_comment でその箇所に質問
@@ -677,6 +689,41 @@ def reply_comment(session_id: str, comment_id: str, message: str) -> str:
     """
     reply = storage.add_reply(session_id, comment_id, message, author="ai")
     return _dumps({"ok": True, "reply": reply})
+
+
+@server.tool()
+def resolve_comment(
+    session_id: str, comment_id: str, resolved: bool = True
+) -> str:
+    """コメントのスレッドを解決済み（完了済み）にする。resolved=False で未解決に戻す。
+
+    人間が画面のカードで付けるのと同じ「解決済み」で、AIも人間と同じ裁量で
+    付け外しできる。人間のコメントも AI のコメントも対象で、人間が解決した
+    ものを AI が未解決に戻すことも、その逆もできる。指摘を修正稿に反映して
+    もう話すことが無い、質問に答えて人間の返信で納得が示された、AI 自身の
+    問いかけに答えが出た、など、そのスレッドで人間も AI ももう何もしなくて
+    よいと判断したときに使う。人間の返信で疑問や反論が続いているスレッドは
+    解決しない。
+
+    解決済みのコメントは画面のコメント一覧から外れて本文のハイライトも消え、
+    get_feedback の comments と annotated_text の〖Cn〗にも出なくなる。番号は
+    振り直さないので、残ったコメントの番号は変わらない。コメント本体と返信は
+    消えない。
+
+    Args:
+        session_id: セッションID
+        comment_id: 対象コメントのID（get_feedback の comments[].id）
+        resolved: True で解決済みにする（既定）、False で未解決に戻す
+    """
+    comment = storage.set_comment_resolved(
+        session_id, comment_id, resolved, by="ai")
+    return _dumps({
+        "ok": True,
+        "id": comment["id"],
+        "resolved": storage.is_resolved(comment),
+        "resolved_by": comment.get("resolved_by", ""),
+        "resolved_at": comment.get("resolved_at", ""),
+    })
 
 
 @server.tool()

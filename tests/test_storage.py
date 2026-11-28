@@ -589,3 +589,55 @@ def test_update_comment_rejects_bad_tag_without_touching_comment():
     c = storage.load_session(s["id"])["comments"][0]
     assert c["text"] == "元"
     assert "updated_at" not in c
+
+
+# ---------- コメントの解決（完了済み） ----------
+
+def test_resolve_and_reopen_comment():
+    """人間も AI も同じ操作で解決でき、未解決に戻すとキーごと消える。"""
+    s = storage.create_session("本文", "解決", "")
+    storage.add_comment(s["id"], "本文", "直して", comment_id="c1")
+    storage.add_reply(s["id"], "c1", "直しました", author="ai")
+    c = storage.set_comment_resolved(s["id"], "c1", True, by="ai")
+    assert storage.is_resolved(c)
+    assert c["resolved_by"] == "ai" and c["resolved_at"]
+    saved = storage.load_session(s["id"])["comments"][0]
+    assert saved["resolved_by"] == "ai"
+    # コメント本体と返信は残り、編集済みの印も付かない
+    assert saved["text"] == "直して" and len(saved["replies"]) == 1
+    assert "updated_at" not in saved
+    # AI が付けた解決を人間が外すこともできる
+    c = storage.set_comment_resolved(s["id"], "c1", False, by="human")
+    assert not storage.is_resolved(c)
+    saved = storage.load_session(s["id"])["comments"][0]
+    assert "resolved_at" not in saved and "resolved_by" not in saved
+
+
+def test_resolving_twice_keeps_first_record():
+    s = storage.create_session("本文", "解決", "")
+    storage.add_comment(s["id"], "本文", "直して", comment_id="c1")
+    first = dict(storage.set_comment_resolved(s["id"], "c1", True, by="human"))
+    again = storage.set_comment_resolved(s["id"], "c1", True, by="ai")
+    assert again["resolved_by"] == "human"
+    assert again["resolved_at"] == first["resolved_at"]
+    # 未解決のものを戻しても何も起きない
+    storage.set_comment_resolved(s["id"], "c1", False, by="ai")
+    c = storage.set_comment_resolved(s["id"], "c1", False, by="ai")
+    assert not storage.is_resolved(c)
+
+
+@pytest.mark.parametrize("resolved, by", [
+    ("true", "human"), (1, "human"), (None, "human"), (True, "bot"), (True, ""),
+])
+def test_resolve_rejects_bad_values(resolved, by):
+    s = storage.create_session("本文", "解決", "")
+    storage.add_comment(s["id"], "本文", "直して", comment_id="c1")
+    with pytest.raises(ValueError):
+        storage.set_comment_resolved(s["id"], "c1", resolved, by=by)
+    assert not storage.is_resolved(storage.load_session(s["id"])["comments"][0])
+
+
+def test_resolve_missing_comment_raises():
+    s = storage.create_session("本文", "解決", "")
+    with pytest.raises(KeyError):
+        storage.set_comment_resolved(s["id"], "nope", True, by="human")
